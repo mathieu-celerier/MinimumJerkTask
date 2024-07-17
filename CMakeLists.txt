@@ -7,6 +7,10 @@ set(PROJECT_NAME MinimumJerkTask)
 set(PROJECT_DESCRIPTION "MinimJerk task for mc_rtc")
 set(PROJECT_URL "")
 
+set(PROJECT_USE_CMAKE_EXPORT TRUE)
+
+include(cmake/base.cmake)
+
 project(${PROJECT_NAME} LANGUAGES CXX VERSION 0.1.0)
 
 if(NOT TARGET mc_rtc::control)
