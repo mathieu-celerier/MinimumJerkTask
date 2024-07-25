@@ -47,6 +47,7 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
   K_ev_.setZero();
   D_.setZero();
   commanded_acc_.setZero();
+  disturbance_acc_.setZero();
 
   W_1_.block<3, 3>(0, 0) = 1e6 * Eigen::Matrix3d::Identity();
   W_1_.block<3, 3>(3, 3) = 1e6 * Eigen::Matrix3d::Identity();
@@ -220,7 +221,7 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   lb_QP_ << -200, -200, -200, lambda_L_ * (W_ - L_),
       -lambda_tau_ * tau_ - (1 / T_), -200, -200, -200;
   ub_QP_ << 200, 200, 200, lambda_L_ * (max_L_ - L_),
-      lambda_tau_ * (0.9 - tau_) - (1 / T_), 200, 200, 200;
+      lambda_tau_ * (0.85 - tau_) - (1 / T_), 200, 200, 200;
 
   // Solve QP
   bool success = solver_.solve(H_QP_, f_QP_, Eigen::MatrixXd::Zero(0, 0),
@@ -242,10 +243,10 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   commanded_acc_ = commanded_acc_ - dx_.block<3, 1>(6, 0) * solver.dt();
 
   auto J = jac_->jacobian(robot.mb(), robot.mbc());
-  disturbance_acc_ = J * tvm_robot.alphaDExternal().tail<3>();
+  disturbance_acc_ = J * tvm_robot.alphaDExternal();
 
   // Set PositionTask's refAccel
-  PositionTask::refAccel(commanded_acc_ + disturbance_acc_);
+  PositionTask::refAccel(commanded_acc_ + disturbance_acc_.tail<3>());
 
   PositionTask::update(solver);
 }
@@ -258,7 +259,7 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
       "MinimumJerkTask_state_error_vel",
       [this]() -> Eigen::Vector3d { return x_.block<3, 1>(3, 0); });
   logger.addLogEntry(
-      "MinimumJerkTask_state_error_vel",
+      "MinimumJerkTask_state_error_acc",
       [this]() -> Eigen::Vector3d { return x_.block<3, 1>(6, 0); });
   logger.addLogEntry("MinimumJerkTask_state_traj_length",
                      [this]() -> double { return x_(9); });
@@ -268,13 +269,13 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
                      [this]() -> Eigen::Vector3d { return x_.tail<3>(); });
 
   // ========== State derivative logging ========== //
-  logger.addLogEntry("MinimumJerkTask_stateD_error_pos",
+  logger.addLogEntry("MinimumJerkTask_stateD_error_vel",
                      [this]() -> Eigen::Vector3d { return dx_.head<3>(); });
   logger.addLogEntry(
-      "MinimumJerkTask_stateD_error_vel",
+      "MinimumJerkTask_stateD_error_acc",
       [this]() -> Eigen::Vector3d { return dx_.block<3, 1>(3, 0); });
   logger.addLogEntry(
-      "MinimumJerkTask_stateD_error_vel",
+      "MinimumJerkTask_stateD_error_jerk",
       [this]() -> Eigen::Vector3d { return dx_.block<3, 1>(6, 0); });
   logger.addLogEntry("MinimumJerkTask_stateD_traj_length",
                      [this]() -> double { return dx_(9); });
@@ -301,8 +302,11 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
                      [this]() { return eval().norm(); });
   logger.addLogEntry("MinimumJerkTask_commanded_acc",
                      [this]() -> Eigen::Vector3d { return commanded_acc_; });
+  logger.addLogEntry(
+      "MinimumJerkTask_disturb_acc",
+      [this]() -> Eigen::Vector3d { return disturbance_acc_.tail<3>(); });
   logger.addLogEntry("MinimumJerkTask_ref_acc", [this]() -> Eigen::Vector3d {
-    return commanded_acc_ + disturbance_acc_;
+    return commanded_acc_ + disturbance_acc_.tail<3>();
   });
   PositionTask::addToLogger(logger);
 }

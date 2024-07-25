@@ -179,7 +179,7 @@ protected:
   Eigen::Matrix<double, 8, 1> K_ev_;
   Eigen::Vector3d D_;
   Eigen::Vector3d commanded_acc_;
-  Eigen::Vector3d disturbance_acc_;
+  Eigen::Vector6d disturbance_acc_;
 
   // QP matrices
   Eigen::Matrix<double, 8, 8> H_QP_;
