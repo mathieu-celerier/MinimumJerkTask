@@ -2,6 +2,7 @@
  * Copyright 2015-2022 CNRS-UM LIRMM, CNRS-AIST JRL
  */
 
+#include <mc_rtc/gui/NumberInput.h>
 #include <mc_tasks/MinimumJerkTask.h>
 
 #include <mc_rtc/gui/Point3D.h>
@@ -127,7 +128,9 @@ void MinimumJerkTask::updateB(void) {
 
   // Jacobian for acceleration error
   B_.block<3, 1>(3, 3) =
-      (-(30.0 * tau2 * ln2 * (lnT - 1) * pow(tau_ - 1.0, 2)) / pow(lnT, 2)) *
+      (-(30.0 * tau2 * ln2 * (fitts_a_ * ln2 + fitts_b_ * lnT - fitts_b_) *
+         pow(tau_ - 1.0, 2)) /
+       pow(lnT, 2)) *
       D_;
   B_.block<3, 1>(3, 4) =
       (L_ / T_) * (-120.0 * tau3 + 180.0 * tau2 - 60.0 * tau_) * D_;
@@ -135,10 +138,11 @@ void MinimumJerkTask::updateB(void) {
       (L_ / T_) * (-30.0 * tau4 + 60.0 * tau3 - 30.0 * tau2) * SD;
 
   // Jacobian for jerk error
-  B_.block<3, 1>(6, 3) =
-      (-(60 * tau_ * pow(ln2, 2) * (lnT - 2) * (2 * tau_ - 1) * (tau_ - 1)) /
-       pow(lnT, 3)) *
-      D_;
+  B_.block<3, 1>(6, 3) = (-(60 * tau_ * pow(ln2, 2) *
+                            (fitts_a_ * ln2 + fitts_b_ * lnT - 2 * fitts_b_) *
+                            (2 * tau_ - 1) * (tau_ - 1)) /
+                          pow(lnT, 3)) *
+                         D_;
   B_.block<3, 1>(6, 4) =
       (L_ / pow(T_, 2)) * (-360.0 * tau_ * tau_ + 360.0 * tau_ - 60.0) * D_;
   B_.block<3, 3>(6, 5) =
@@ -179,12 +183,17 @@ void MinimumJerkTask::solveLQR(void) {
 void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   auto &robot = frame_->robot();
   mc_tvm::Robot &tvm_robot = robot.tvmRobot();
+
+  auto J = jac_->jacobian(robot.mb(), robot.mbc());
+  disturbance_acc_ = J * tvm_robot.alphaDExternal();
+
   sva::PTransform transform(robot.bodyPosW(bodyName_));
   curr_pos_ = robot.bodyPosW(bodyName_).translation();
   Eigen::Vector3d vel = robot.bodyVelW(bodyName_).linear();
   Eigen::Vector3d acc =
       transform.rotation().transpose() * robot.bodyAccB(bodyName_).linear() +
-      robot.bodyVelW(bodyName_).angular().cross(vel);
+      robot.bodyVelW(bodyName_).angular().cross(vel) -
+      disturbance_acc_.tail<3>();
   // Eigen::Vector3d acc =
   //     transform.rotation().transpose() * robot.bodyAccB(bodyName_).linear();
   //     NOT CORRECT
@@ -241,9 +250,6 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   x_ = x_ + dx_ * solver.dt();
   x_.tail<3>().normalize();
   commanded_acc_ = commanded_acc_ - dx_.block<3, 1>(6, 0) * solver.dt();
-
-  auto J = jac_->jacobian(robot.mb(), robot.mbc());
-  disturbance_acc_ = J * tvm_robot.alphaDExternal();
 
   // Set PositionTask's refAccel
   PositionTask::refAccel(commanded_acc_ + disturbance_acc_.tail<3>());
@@ -308,10 +314,23 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
   logger.addLogEntry("MinimumJerkTask_ref_acc", [this]() -> Eigen::Vector3d {
     return commanded_acc_ + disturbance_acc_.tail<3>();
   });
-  PositionTask::addToLogger(logger);
+  // PositionTask::addToLogger(logger);
 }
 
 void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
+  gui.addElement(
+      {"Tasks", name_, "Parameters"},
+      mc_rtc::gui::Label("Trajectory length", [this]() { return L_; }),
+      mc_rtc::gui::Label("Trajectory phase", [this]() { return tau_; }),
+      mc_rtc::gui::ArrayInput(
+          "State weight",
+          {"ex", "ey", "ez", "vx", "vy", "vz", "ax", "ay", "az"},
+          [this]() { return W_1(); }, [this](Eigen::VectorXd v) { W_1(v); }),
+      mc_rtc::gui::ArrayInput(
+          "Input weight", {"Jx", "Jy", "Jz", "L", "tau", "Dx", "Dy", "Dz"},
+          [this]() { return W_2(); }, [this](Eigen::VectorXd v) { W_2(v); }),
+      mc_rtc::gui::NumberInput("Fitts's constant (a)", fitts_a_),
+      mc_rtc::gui::NumberInput("Fitts's proportional (b)", fitts_b_));
   gui.addElement(
       {"Tasks", name_, "Visual"},
       mc_rtc::gui::Arrow(
@@ -324,18 +343,7 @@ void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
           [this]() -> Eigen::Vector3d {
             return curr_pos_ - 0.2 * x_.block<3, 1>(6, 0).normalized();
           }));
-  gui.addElement(
-      {"Tasks", name_, "Parameters"},
-      mc_rtc::gui::Label("Trajectory length", [this]() { return L_; }),
-      mc_rtc::gui::Label("Trajectory phase", [this]() { return tau_; }),
-      mc_rtc::gui::ArrayInput(
-          "State weight",
-          {"ex", "ey", "ez", "vx", "vy", "vz", "ax", "ay", "az"},
-          [this]() { return W_1(); }, [this](Eigen::VectorXd v) { W_1(v); }),
-      mc_rtc::gui::ArrayInput(
-          "Input weight", {"Jx", "Jy", "Jz", "L", "tau", "Dx", "Dy", "Dz"},
-          [this]() { return W_2(); }, [this](Eigen::VectorXd v) { W_2(v); }));
-  PositionTask::addToGUI(gui);
+  // PositionTask::addToGUI(gui);
 }
 
 } // namespace mc_tasks

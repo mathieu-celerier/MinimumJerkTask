@@ -13,6 +13,7 @@
 #include <mc_rtc/gui/ArrayInput.h>
 #include <mc_rtc/gui/Arrow.h>
 #include <mc_rtc/gui/Label.h>
+#include <mc_rtc/gui/NumberInput.h>
 #include <mc_tvm/Robot.h>
 
 namespace mc_tasks {
