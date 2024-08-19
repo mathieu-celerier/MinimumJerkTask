@@ -120,13 +120,13 @@ void MinimumJerkTask::updateB(void) {
   Eigen::Matrix3d SD;
   SD << 0, -D_(2), D_(1), D_(2), 0, -D_(0), -D_(1), D_(0), 0;
 
-  // Jacobian for velocity error
+  // Jacobian for position error
   B_.block<3, 1>(0, 3) = (-6.0 * tau5 + 15.0 * tau4 - 10.0 * tau3 + 1.0) * D_;
   B_.block<3, 1>(0, 4) = L_ * (-30.0 * tau4 + 60.0 * tau3 - 30.0 * tau2) * D_;
   B_.block<3, 3>(0, 5) =
       L_ * (-6.0 * tau5 + 15.0 * tau4 - 10.0 * tau3 + 1.0) * SD;
 
-  // Jacobian for acceleration error
+  // Jacobian for velocity error
   B_.block<3, 1>(3, 3) =
       (-(30.0 * tau2 * ln2 * (fitts_a_ * ln2 + fitts_b_ * lnT - fitts_b_) *
          pow(tau_ - 1.0, 2)) /
@@ -137,7 +137,7 @@ void MinimumJerkTask::updateB(void) {
   B_.block<3, 3>(3, 5) =
       (L_ / T_) * (-30.0 * tau4 + 60.0 * tau3 - 30.0 * tau2) * SD;
 
-  // Jacobian for jerk error
+  // Jacobian for acceleration error
   B_.block<3, 1>(6, 3) = (-(60 * tau_ * pow(ln2, 2) *
                             (fitts_a_ * ln2 + fitts_b_ * lnT - 2 * fitts_b_) *
                             (2 * tau_ - 1) * (tau_ - 1)) /
@@ -192,8 +192,7 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   Eigen::Vector3d vel = robot.bodyVelW(bodyName_).linear();
   Eigen::Vector3d acc =
       transform.rotation().transpose() * robot.bodyAccB(bodyName_).linear() +
-      robot.bodyVelW(bodyName_).angular().cross(vel) -
-      disturbance_acc_.tail<3>();
+      robot.bodyVelW(bodyName_).angular().cross(vel);
   // Eigen::Vector3d acc =
   //     transform.rotation().transpose() * robot.bodyAccB(bodyName_).linear();
   //     NOT CORRECT
@@ -249,7 +248,7 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   dx_ = f_ + g_ * u_;
   x_ = x_ + dx_ * solver.dt();
   x_.tail<3>().normalize();
-  commanded_acc_ = commanded_acc_ - dx_.block<3, 1>(6, 0) * solver.dt();
+  commanded_acc_ = commanded_acc_ - 2 * dx_.block<3, 1>(6, 0) * solver.dt();
 
   // Set PositionTask's refAccel
   PositionTask::refAccel(commanded_acc_ + disturbance_acc_.tail<3>());
