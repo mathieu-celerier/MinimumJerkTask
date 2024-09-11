@@ -52,6 +52,10 @@ public:
       mc_rtc::log::error_and_throw<std::domain_error>(
           "W as to be greater than 0");
     W_ = w;
+    if (W_ < L_) {
+      L_ = W_;
+      x_(9) = W_;
+    }
   }
 
   inline double W(void) { return W_; }
@@ -117,6 +121,10 @@ public:
 
   inline double fitts_b(void) { return fitts_b_; }
 
+  inline void react_time(double time) { reaction_time_ = time; }
+
+  inline double react_time(void) { return reaction_time_; }
+
   inline void setTarget(Eigen::Vector3d pos) {
     target_pos_ = pos;
     init_ = true;
@@ -127,8 +135,8 @@ public:
 
   void addToGUI(mc_rtc::gui::StateBuilder &gui) override;
 
-  inline Eigen::Vector3d eval(void) { return x_.head<3>(); }
-  inline Eigen::Vector3d speed(void) { return -x_.block<3, 1>(3, 0); }
+  inline Eigen::Vector3d eval(void) { return x_.head<3>(); };
+  inline Eigen::Vector3d speed(void) { return x_.block<3, 1>(3, 0); };
 
 protected:
   mc_rbdyn::ConstRobotFramePtr frame_;
@@ -136,7 +144,7 @@ protected:
 
   void update(mc_solver::QPSolver &solver) override;
 
-  void computeFitts(void);
+  void computeDuration(void);
   void computeMinJerkState(void);
   void computeF(void);
   void updateB(void);
@@ -150,10 +158,12 @@ protected:
   Eigen::Vector3d curr_pos_;
 
   bool init_;
+  std::string qp_state;
 
   // Control parameters
   double W_;
   double max_L_;
+  double max_tau_;
   double lambda_L_;
   double lambda_tau_;
   Eigen::Matrix<double, 9, 9> W_1_;
@@ -163,6 +173,7 @@ protected:
   Eigen::Matrix<double, 9, 9> Q_;
   double fitts_a_;
   double fitts_b_;
+  double reaction_time_;
 
   // Control variables
   double L_;
@@ -174,13 +185,16 @@ protected:
   Eigen::Matrix<double, 8, 1> u_;
   Eigen::Matrix<double, 9, 9> A_;
   Eigen::Matrix<double, 9, 8> B_;
+  double T_fitts_;
   double T_;
   Eigen::Matrix<double, 9, 1> err_mj_;
   Eigen::Matrix<double, 9, 1> err_lyap_;
   Eigen::Matrix<double, 8, 1> K_ev_;
   Eigen::Vector3d D_;
   Eigen::Vector3d commanded_acc_;
+  Eigen::Vector3d ref_acc_;
   Eigen::Vector6d disturbance_acc_;
+  double reaction_time_counter_;
 
   // QP matrices
   Eigen::Matrix<double, 8, 8> H_QP_;

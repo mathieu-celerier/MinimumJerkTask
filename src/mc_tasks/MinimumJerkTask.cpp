@@ -17,9 +17,10 @@ MinimumJerkTask::MinimumJerkTask(const std::string &bodyName,
 MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
                                  double weight)
     : PositionTask(frame, 0.0, weight), frame_(frame),
-      bodyName_(frame_->body()), init_(true), W_(0.03), max_L_(2.0),
-      lambda_L_(100), lambda_tau_(100), fitts_a_(0), fitts_b_(1.0),
-      jac_(new rbd::Jacobian(frame.robot().mb(), frame.body())), solver_() {
+      bodyName_(frame_->body()), init_(true), qp_state("QP_success"), W_(0.03),
+      max_L_(2.0), max_tau_(0.9), lambda_L_(100), lambda_tau_(100), fitts_a_(0),
+      fitts_b_(1.0), jac_(new rbd::Jacobian(frame.robot().mb(), frame.body())),
+      solver_() {
   switch (backend_) {
   case Backend::TVM:
     break;
@@ -76,17 +77,18 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
   x_(10) = tau_;
 
   H_QP_ = 2 * W_2_.transpose() * W_2_;
-  solveLQR();
 }
 
-void MinimumJerkTask::computeFitts(void) {
+void MinimumJerkTask::computeDuration(void) {
   if ((L_ / W_) < 1.0) {
     mc_rtc::log::error_and_throw<std::range_error>(
         "Issue in trajectory length and width ratio for Fitts's "
         "duration computation. \n Length = {} | Width = {}",
         L_, W_);
   }
-  T_ = fitts_a_ + fitts_b_ * std::log2(2.0 * L_ / W_);
+  T_fitts_ = fitts_a_ + fitts_b_ * std::log2(2.0 * L_ / W_);
+
+  T_ = T_fitts_;
 }
 
 void MinimumJerkTask::computeMinJerkState(void) {
@@ -158,25 +160,85 @@ void MinimumJerkTask::updateG(void) {
 void MinimumJerkTask::solveLQR(void) {
   auto B = B_.block<9, 3>(0, 0);
   auto R = W_2_.block<3, 3>(0, 0);
+  auto Q = W_1_;
 
-  P_.setZero();
-  Eigen::Matrix<double, 9, 9> dPdt;
-  dPdt.setOnes();
-  int iter = 0;
-  do {
-    dPdt = P_ * A_ + A_.transpose() * P_ -
-           (P_ * B) * R.inverse() * (B.transpose() * P_) + W_1_;
-    P_ = P_ + 0.01 * dPdt;
-    iter += 1;
-  } while (dPdt.norm() > 1e-8 and iter < 50000);
-  if (dPdt.norm() > 1e-8) {
-    mc_rtc::log::error("[MinimumJerkTask] LQR solution didn't converge");
-  } else {
+  size_t n = static_cast<size_t>(A_.rows());
+
+  // Form the Hamiltoninan matrix Z
+  Eigen::MatrixXd Z(2 * n, 2 * n);
+  Z << A_, -B * R.inverse() * B.transpose(), -Q, -A_.transpose();
+  mc_rtc::log::info("Z matrix: {}", Z);
+
+  // Compute eigenvalues and eigenvectors
+  Eigen::ComplexEigenSolver<Eigen::MatrixXd> eig_solver(Z);
+  Eigen::MatrixXcd eigenvalues = eig_solver.eigenvalues();
+  Eigen::MatrixXcd eigenvectors = eig_solver.eigenvectors();
+
+  // Print eigenvalues for debugging
+  std::cout << "Eigenvalues of Z:\n" << eigenvalues << "\n\n";
+
+  // Select the stable eigenvectors (corresponding to eigenvalues with negative
+  // real parts)
+  std::vector<int> stable_indices;
+  for (size_t i = 0; i < 2 * n; ++i) {
+    if (eigenvalues(int(i)).real() < 0) {
+      stable_indices.push_back(int(i));
+    }
+  }
+
+  // Check if we found exactly 'n' stable eigenvalues
+  if (stable_indices.size() != n) {
+    mc_rtc::log::error_and_throw<std::runtime_error>(
+        "Could not find exactly 'n' stable eigenvalues.");
+  }
+
+  // Sort stable indices by the real part of eigenvalues (descending)
+  std::sort(stable_indices.begin(), stable_indices.end(), [&](int a, int b) {
+    return eigenvalues(a).real() > eigenvalues(b).real();
+  });
+
+  // Form the stable subspace using the stable eigenvectors
+  Eigen::MatrixXcd V_stable(2 * n, n);
+  for (size_t i = 0; i < n; ++i) {
+    std::cout << "Selected eigenvalue: " << eigenvalues(stable_indices[i])
+              << std::endl;
+    std::cout << "Associated eigenvector: "
+              << eigenvectors.col(stable_indices[i]).head(int(n)) << std::endl;
+    V_stable.col(int(i)) = eigenvectors.col(stable_indices[i]);
+  }
+
+  // Partition the eigenvector matrix into V1 and V2
+  Eigen::MatrixXcd V1 = V_stable.topRows(int(n));    // Top half (V1)
+  Eigen::MatrixXcd V2 = V_stable.bottomRows(int(n)); // Bottom half (V2)
+
+  // Compute the Riccati solution X = V2 * V1.inverse()
+  Eigen::MatrixXd P = (V2 * V1.inverse()).real();
+  Eigen::IOFormat format(5, 0, " ", "\n", "[", "]", "", "");
+  std::cout << "P pre average:\n" << P.format(format) << std::endl;
+  // Improve with quasi-symmetric solution
+  P = 0.5 * (P + P.transpose());
+  std::cout << "P post average:\n" << P.format(format) << std::endl;
+
+  // Check validity of Riccati solution
+  Eigen::MatrixXd R_inv = R.inverse();
+  Eigen::MatrixXd left_side =
+      A_.transpose() * P + P * A_ - P * B * R_inv * B.transpose() * P + Q;
+  if (left_side.isZero(1e-6)) {
+    // We can take the new solution
+    P_ = P;
     K_ = R.inverse() * B.transpose() * P_;
-    mc_rtc::log::info("[MinimumJerkTask] Solved LQR | norm");
+    mc_rtc::log::info("[MinimumJerkTask] Solved LQR");
     Eigen::IOFormat format(5, 0, " ", "\n", "[", "]", "", "");
     std::cout << "P matrix\n" << P_.format(format) << "\n";
     std::cout << "K matrix\n" << K_.format(format) << "\n";
+  } else {
+    auto K = R.inverse() * B.transpose() * P;
+    mc_rtc::log::warning("[MinimumJerkTask] Failed to solve LQR, computed "
+                         "solution does not verifies Riccati equation");
+    Eigen::IOFormat format(5, 0, " ", "\n", "[", "]", "", "");
+    std::cout << "Left side: \n" << left_side.format(format) << "\n";
+    std::cout << "P matrix\n" << P.format(format) << "\n";
+    std::cout << "K matrix\n" << K.format(format) << "\n";
   }
 }
 
@@ -205,8 +267,17 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
     x_(9) = L_;
     tau_ = 0.0;
     x_(10) = tau_;
+    reaction_time_counter_ = 0;
     init_ = false;
   }
+
+  if (reaction_time_counter_ < reaction_time_) {
+    reaction_time_counter_ += solver.dt();
+    PositionTask::refAccel(Eigen::Vector3d::Zero());
+    PositionTask::update(solver);
+    return;
+  }
+
   x_.block<3, 1>(0, 0) = err;
   x_.block<3, 1>(3, 0) = -vel;
   x_.block<3, 1>(6, 0) = -acc;
@@ -214,7 +285,7 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   L_ = x_(9);
   tau_ = x_(10);
   D_ = x_.tail(3);
-  computeFitts();
+  computeDuration();
   computeMinJerkState();
   computeF();
   err_lyap_ = err_mj_ - x_.head(9);
@@ -229,7 +300,7 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   lb_QP_ << -200, -200, -200, lambda_L_ * (W_ - L_),
       -lambda_tau_ * tau_ - (1 / T_), -200, -200, -200;
   ub_QP_ << 200, 200, 200, lambda_L_ * (max_L_ - L_),
-      lambda_tau_ * (0.85 - tau_) - (1 / T_), 200, 200, 200;
+      lambda_tau_ * (max_tau_ - tau_) - (1 / T_), 200, 200, 200;
 
   // Solve QP
   bool success = solver_.solve(H_QP_, f_QP_, Eigen::MatrixXd::Zero(0, 0),
@@ -241,17 +312,22 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
     mc_rtc::log::warning(
         "MinimumJerkTask's QP failed,applying worst case convergence");
     u_ = -K_ev_;
+    qp_state = "QP_failed";
   } else {
     u_ = solver_.result();
+    qp_state = "QP_success";
   }
 
   dx_ = f_ + g_ * u_;
   x_ = x_ + dx_ * solver.dt();
+  x_(10) = (x_(10) < max_tau_) ? x_(10) : max_tau_;
+  x_(9) = (x_(9) > W_ + 1e-9) ? x_(9) : W_ + 1e-9;
   x_.tail<3>().normalize();
-  commanded_acc_ = commanded_acc_ - 2 * dx_.block<3, 1>(6, 0) * solver.dt();
+  commanded_acc_ = commanded_acc_ - dx_.block<3, 1>(6, 0) * solver.dt();
+  ref_acc_ = commanded_acc_ - 2.0 * disturbance_acc_.tail<3>();
 
   // Set PositionTask's refAccel
-  PositionTask::refAccel(commanded_acc_ + disturbance_acc_.tail<3>());
+  PositionTask::refAccel(ref_acc_);
 
   PositionTask::update(solver);
 }
@@ -297,6 +373,24 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
       [this]() -> Eigen::Vector3d { return err_mj_.block<3, 1>(3, 0); });
   logger.addLogEntry("MinimumJerkTask_minimum_jerk_state_acc",
                      [this]() -> Eigen::Vector3d { return err_mj_.tail<3>(); });
+  logger.addLogEntry("MinimumJerkTask_minimum_jerk_duration",
+                     [this]() { return T_; });
+
+  // ========== Fitts related ========== //
+  logger.addLogEntry("MinimumJerkTask_Fitts_a", [this]() { return fitts_a_; });
+  logger.addLogEntry("MinimumJerkTask_Fitts_b", [this]() { return fitts_b_; });
+  logger.addLogEntry("MinimumJerkTask_Fitts_W", [this]() { return W_; });
+  logger.addLogEntry("MinimumJerkTask_Fitts_duration",
+                     [this]() { return T_fitts_; });
+  logger.addLogEntry("MinimumJerkTask_Fitts_reaction_time",
+                     [this]() { return reaction_time_; });
+
+  // ========== QP related ========== //
+  logger.addLogEntry("MinimumJerkTask_QP_state", [this]() { return qp_state; });
+  logger.addLogEntry("MinimumJerkTask_QP_linear_cost",
+                     [this]() -> Eigen::VectorXd { return f_QP_; });
+  logger.addLogEntry("MinimumJerkTask_QP_W1", [this]() { return W_1(); });
+  logger.addLogEntry("MinimumJerkTask_QP_W2", [this]() { return W_2(); });
 
   // ========== Other ========== //
   logger.addLogEntry("MinimumJerkTask_target_pose",
@@ -310,26 +404,33 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
   logger.addLogEntry(
       "MinimumJerkTask_disturb_acc",
       [this]() -> Eigen::Vector3d { return disturbance_acc_.tail<3>(); });
-  logger.addLogEntry("MinimumJerkTask_ref_acc", [this]() -> Eigen::Vector3d {
-    return commanded_acc_ + disturbance_acc_.tail<3>();
-  });
+  logger.addLogEntry("MinimumJerkTask_ref_acc",
+                     [this]() -> Eigen::Vector3d { return ref_acc_; });
   // PositionTask::addToLogger(logger);
 }
 
 void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
+  gui.addElement({"Tasks", name_, "Hyperparameters"},
+                 mc_rtc::gui::NumberInput("tau upper limit", max_tau_),
+                 mc_rtc::gui::NumberInput("Fitts's constant (a)", fitts_a_),
+                 mc_rtc::gui::NumberInput("Fitts's proportional (b)", fitts_b_),
+                 mc_rtc::gui::NumberInput("Reaction time", reaction_time_));
   gui.addElement(
-      {"Tasks", name_, "Parameters"},
-      mc_rtc::gui::Label("Trajectory length", [this]() { return L_; }),
-      mc_rtc::gui::Label("Trajectory phase", [this]() { return tau_; }),
+      {"Tasks", name_, "Gains"},
       mc_rtc::gui::ArrayInput(
           "State weight",
           {"ex", "ey", "ez", "vx", "vy", "vz", "ax", "ay", "az"},
           [this]() { return W_1(); }, [this](Eigen::VectorXd v) { W_1(v); }),
       mc_rtc::gui::ArrayInput(
           "Input weight", {"Jx", "Jy", "Jz", "L", "tau", "Dx", "Dy", "Dz"},
-          [this]() { return W_2(); }, [this](Eigen::VectorXd v) { W_2(v); }),
-      mc_rtc::gui::NumberInput("Fitts's constant (a)", fitts_a_),
-      mc_rtc::gui::NumberInput("Fitts's proportional (b)", fitts_b_));
+          [this]() { return W_2(); }, [this](Eigen::VectorXd v) { W_2(v); }));
+  gui.addElement(
+      {"Tasks", name_, "Computed"},
+      mc_rtc::gui::Label("Trajectory length", [this]() { return L_; }),
+      mc_rtc::gui::Label("Trajectory phase", [this]() { return tau_; }),
+      mc_rtc::gui::Label("Trajectory duration", [this]() { return T_; }),
+      mc_rtc::gui::Label("Fitts duration", [this]() { return T_fitts_; }),
+      mc_rtc::gui::Label("Target size", [this]() { return W_; }));
   gui.addElement(
       {"Tasks", name_, "Visual"},
       mc_rtc::gui::Arrow(
@@ -341,8 +442,8 @@ void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
           "Acc Direction", [this]() -> Eigen::Vector3d { return curr_pos_; },
           [this]() -> Eigen::Vector3d {
             return curr_pos_ - 0.2 * x_.block<3, 1>(6, 0).normalized();
-          }));
+          }),
+      mc_rtc::gui::Point3DRO("Target position", target_pos_));
   // PositionTask::addToGUI(gui);
 }
-
 } // namespace mc_tasks
