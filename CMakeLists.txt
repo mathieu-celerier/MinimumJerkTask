@@ -17,11 +17,11 @@ if(NOT TARGET mc_rtc::control)
   find_package(mc_rtc REQUIRED)
 endif()
 
-# enable_testing()
-#
-# if(BUILD_TESTING)
-#   add_subdirectory(tests)
-# endif()
+enable_testing()
+
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()
 
 include_directories(include)
 

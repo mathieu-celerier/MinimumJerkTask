@@ -11,7 +11,9 @@
 #include <RBDyn/Jacobian.h>
 #include <eigen-qld/QLD.h>
 #include <mc_rtc/gui/ArrayInput.h>
+#include <mc_rtc/gui/ArrayLabel.h>
 #include <mc_rtc/gui/Arrow.h>
+#include <mc_rtc/gui/Checkbox.h>
 #include <mc_rtc/gui/Label.h>
 #include <mc_rtc/gui/NumberInput.h>
 #include <mc_tvm/Robot.h>
@@ -79,8 +81,8 @@ public:
 
   inline void W_1(Eigen::VectorXd W) {
     W_1_ = W.asDiagonal();
-    computeQ();
     solveLQR();
+    computeQ();
   }
 
   inline Eigen::VectorXd W_1(void) { return W_1_.diagonal(); }
@@ -88,8 +90,8 @@ public:
   inline void W_2(Eigen::VectorXd W) {
     W_2_ = W.asDiagonal();
     H_QP_ = 2 * W_2_.transpose() * W_2_;
-    computeQ();
     solveLQR();
+    computeQ();
   }
 
   inline Eigen::VectorXd W_2(void) { return W_2_.diagonal(); }
@@ -158,6 +160,8 @@ protected:
   Eigen::Vector3d curr_pos_;
 
   bool init_;
+  bool dist_acc_before_;
+  double compensation_factor_;
   std::string qp_state;
 
   // Control parameters
@@ -194,6 +198,7 @@ protected:
   Eigen::Vector3d commanded_acc_;
   Eigen::Vector3d ref_acc_;
   Eigen::Vector6d disturbance_acc_;
+  Eigen::Vector3d mj_pose_;
   double reaction_time_counter_;
 
   // QP matrices
