@@ -179,6 +179,9 @@ protected:
   double fitts_b_;
   double reaction_time_;
 
+  sva::MotionVecd acc_body_;
+  sva::MotionVecd vel_body_;
+
   // Control variables
   double L_;
   double tau_;
@@ -200,10 +203,13 @@ protected:
   Eigen::Vector6d disturbance_acc_;
   Eigen::Vector3d mj_pose_;
   double reaction_time_counter_;
+  Eigen::Matrix<double, 9, 1> dev_pred_;
+  Eigen::Matrix<double, 9, 1> dev_diff_;
+  Eigen::Matrix<double, 9, 1> dyn_error_;
 
   // QP matrices
   Eigen::Matrix<double, 8, 8> H_QP_;
-  Eigen::Matrix<double, 1, 8> f_QP_;
+  Eigen::Matrix<double, 8, 1> f_QP_;
   Eigen::Matrix<double, 1, 8> A_QP_;
   Eigen::Matrix<double, 1, 1> b_QP_;
   Eigen::Matrix<double, 8, 1> lb_QP_;

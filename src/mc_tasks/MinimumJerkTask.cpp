@@ -18,9 +18,9 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
                                  double weight)
     : PositionTask(frame, 0.0, weight), frame_(frame),
       bodyName_(frame_->body()), init_(true), qp_state("QP_success"), W_(0.03),
-      max_L_(2.0), max_tau_(0.9), lambda_L_(100), lambda_tau_(100), fitts_a_(0),
-      fitts_b_(1.0), jac_(new rbd::Jacobian(frame.robot().mb(), frame.body())),
-      solver_() {
+      max_L_(2.0), max_tau_(0.999), lambda_L_(100), lambda_tau_(100),
+      fitts_a_(0), fitts_b_(1.0),
+      jac_(new rbd::Jacobian(frame.robot().mb(), frame.body())), solver_() {
   switch (backend_) {
   case Backend::TVM:
     break;
@@ -97,58 +97,55 @@ void MinimumJerkTask::computeMinJerkState(void) {
   double tau4 = tau3 * tau_; // tau^4
   double tau5 = tau4 * tau_; // tau^5
   err_mj_.block<3, 1>(0, 0) =
-      L_ * (-6.0 * tau5 + 15.0 * tau4 - 10.0 * tau3 + 1.0) * D_;
+      -L_ * (-6.0 * tau5 + 15.0 * tau4 - 10.0 * tau3 + 1.0) * D_;
   err_mj_.block<3, 1>(3, 0) =
-      (L_ / T_) * (-30.0 * tau4 + 60.0 * tau3 - 30.0 * tau2) * D_;
+      -(L_ / T_) * (-30.0 * tau4 + 60.0 * tau3 - 30.0 * tau2) * D_;
   err_mj_.block<3, 1>(6, 0) =
-      (L_ / pow(T_, 2)) * (-120.0 * tau3 + 180.0 * tau2 - 60.0 * tau_) * D_;
+      -(L_ / pow(T_, 2)) * (-120.0 * tau3 + 180.0 * tau2 - 60.0 * tau_) * D_;
 }
 
 void MinimumJerkTask::computeF(void) {
   f_.block<3, 1>(0, 0) = x_.block<3, 1>(3, 0);
   f_.block<3, 1>(3, 0) = x_.block<3, 1>(6, 0);
   f_.block<3, 1>(6, 0) =
-      (L_ / pow(T_, 3)) * (-360.0 * tau_ * tau_ + 360.0 * tau_ - 60.0) * D_;
+      -(L_ / pow(T_, 3)) * (-360.0 * tau_ * tau_ + 360.0 * tau_ - 60.0) * D_;
   f_(10) = 1 / T_;
 }
 
 void MinimumJerkTask::updateB(void) {
-  double lnT = std::log(2.0 * L_ / W_);
-  double tau2 = tau_ * tau_; // tau^2
-  double tau3 = tau2 * tau_; // tau^3
-  double tau4 = tau3 * tau_; // tau^4
-  double tau5 = tau4 * tau_; // tau^5
+  double tau = (tau_ > 0.7) ? 0.7 : tau_;
+  mc_rtc::log::info("tau = {} | used tau = {}", tau_, tau);
+  double tau2 = tau * tau;  // tau^2
+  double tau3 = tau2 * tau; // tau^3
+  double tau4 = tau3 * tau; // tau^4
+  double tau5 = tau4 * tau; // tau^5
   double ln2 = std::log(2);
   Eigen::Matrix3d SD;
   SD << 0, -D_(2), D_(1), D_(2), 0, -D_(0), -D_(1), D_(0), 0;
 
   // Jacobian for position error
-  B_.block<3, 1>(0, 3) = (-6.0 * tau5 + 15.0 * tau4 - 10.0 * tau3 + 1.0) * D_;
-  B_.block<3, 1>(0, 4) = L_ * (-30.0 * tau4 + 60.0 * tau3 - 30.0 * tau2) * D_;
+  B_.block<3, 1>(0, 3) = (6.0 * tau5 - 15.0 * tau4 + 10.0 * tau3 - 1.0) * D_;
+  B_.block<3, 1>(0, 4) = L_ * (30.0 * tau4 - 60.0 * tau3 + 30.0 * tau2) * D_;
   B_.block<3, 3>(0, 5) =
-      L_ * (-6.0 * tau5 + 15.0 * tau4 - 10.0 * tau3 + 1.0) * SD;
+      L_ * (6.0 * tau5 - 15.0 * tau4 + 10.0 * tau3 - 1.0) * SD;
 
   // Jacobian for velocity error
-  B_.block<3, 1>(3, 3) =
-      (-(30.0 * tau2 * ln2 * (fitts_a_ * ln2 + fitts_b_ * lnT - fitts_b_) *
-         pow(tau_ - 1.0, 2)) /
-       pow((fitts_a_ * ln2 + fitts_b_ * lnT), 2)) *
-      D_;
+  B_.block<3, 1>(3, 3) = -((30 * tau4 - 60 * tau3 + 30 * tau2) *
+                           (fitts_b_ - ln2 * T_) / (ln2 * pow(T_, 2))) *
+                         D_;
   B_.block<3, 1>(3, 4) =
-      (L_ / T_) * (-120.0 * tau3 + 180.0 * tau2 - 60.0 * tau_) * D_;
+      (L_ / T_) * (120.0 * tau3 - 180.0 * tau2 + 60.0 * tau) * D_;
   B_.block<3, 3>(3, 5) =
-      (L_ / T_) * (-30.0 * tau4 + 60.0 * tau3 - 30.0 * tau2) * SD;
+      (L_ / T_) * (30.0 * tau4 - 60.0 * tau3 + 30.0 * tau2) * SD;
 
   // Jacobian for acceleration error
-  B_.block<3, 1>(6, 3) = (-(60 * tau_ * pow(ln2, 2) *
-                            (fitts_a_ * ln2 + fitts_b_ * lnT - 2 * fitts_b_) *
-                            (2 * tau_ - 1) * (tau_ - 1)) /
-                          pow((fitts_a_ * ln2 + fitts_b_ * lnT), 3)) *
+  B_.block<3, 1>(6, 3) = -((120.0 * tau3 - 180.0 * tau2 + 60.0 * tau) *
+                           (2 * fitts_b_ - ln2 * T_) / (ln2 * pow(T_, 3))) *
                          D_;
   B_.block<3, 1>(6, 4) =
-      (L_ / pow(T_, 2)) * (-360.0 * tau_ * tau_ + 360.0 * tau_ - 60.0) * D_;
+      (L_ / pow(T_, 2)) * (360.0 * tau * tau - 360.0 * tau + 60.0) * D_;
   B_.block<3, 3>(6, 5) =
-      (L_ / pow(T_, 2)) * (-120.0 * tau3 + 180.0 * tau2 - 60.0 * tau_) * SD;
+      (L_ / pow(T_, 2)) * (120.0 * tau3 - 180.0 * tau2 + 60.0 * tau) * SD;
 }
 
 void MinimumJerkTask::updateG(void) {
@@ -239,7 +236,15 @@ void MinimumJerkTask::solveLQR(void) {
   Eigen::MatrixXd R_inv = R.inverse();
   Eigen::MatrixXd left_side =
       A_.transpose() * P + P * A_ - P * B * R_inv * B.transpose() * P + Q;
-  if (left_side.isZero(1e-6)) {
+
+  // Check lyapunov
+  Eigen::MatrixXd Q_lyap = (R.inverse() * B.transpose() * P).transpose() * R *
+                               (R.inverse() * B.transpose() * P) +
+                           W_1_;
+  Eigen::MatrixXd lyap =
+      Q_lyap + P * (A - B * (R.inverse() * B.transpose() * P)) +
+      (A - B * (R.inverse() * B.transpose() * P)).transpose() * P;
+  if (left_side.isZero(1e-6) and lyap.isZero(1e-6)) {
     // We can take the new solution
     P_ = P;
     K_ = R.inverse() * B.transpose() * P_;
@@ -272,6 +277,8 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   Eigen::Vector3d acc =
       transform.rotation().transpose() * robot.bodyAccB(bodyName_).linear() +
       robot.bodyVelW(bodyName_).angular().cross(vel);
+  acc_body_ = robot.bodyAccB(bodyName_);
+  vel_body_ = robot.bodyVelB(bodyName_);
   if (dist_acc_before_) {
     acc -= disturbance_acc_.tail<3>();
   }
@@ -281,13 +288,14 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
 
   Eigen::Vector3d err = target_pos_ - curr_pos_;
   if (init_) {
-    D_ = err / err.norm();
+    D_ << err / err.norm();
     x_.block<3, 1>(11, 0) = D_;
     L_ = err.norm();
-    x_(9) = L_;
-    tau_ = 0.0;
+    x_(9) = 0.75 * L_;
+    tau_ = 0.5;
     x_(10) = tau_;
     reaction_time_counter_ = 0;
+    commanded_acc_.setZero();
     init_ = false;
   }
 
@@ -315,16 +323,9 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
 
   K_ev_.block<3, 1>(0, 0) = K_ * err_lyap_;
   Eigen::IOFormat format(5, 0, " ", "\n", "[", "]", "", "");
-  auto finit_diff = (err_lyap_ - prev_err_lyap) / solver.dt();
-  auto predict = A_ * prev_err_lyap + B_ * u_;
-  // std::cout << "u = " << u_.transpose().format(format) << std::endl;
-  // std::cout << "finit_diff = " << finit_diff.transpose().format(format)
-  //           << std::endl;
-  // std::cout << "predict = " << predict.transpose().format(format) <<
-  // std::endl; std::cout << "diff = " << (finit_diff -
-  // predict).transpose().format(format)
-  //           << std::endl;
-  // std::cout << "Norm = " << (finit_diff - predict).norm() << std::endl;
+  dev_diff_ = (err_lyap_ - prev_err_lyap) / solver.dt();
+  dev_pred_ = A_ * prev_err_lyap + B_ * u_;
+  dyn_error_ = (dev_diff_ - dev_pred_);
 
   updateB();
   updateG();
@@ -333,10 +334,10 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   f_QP_ = err_lyap_.transpose() * W_1_ * B_;
   A_QP_ = err_lyap_.transpose() * P_ * B_;
   b_QP_ = -err_lyap_.transpose() * P_ * B_ * K_ev_;
-  lb_QP_ << -1000, -1000, -1000, lambda_L_ * (W_ - L_),
-      -lambda_tau_ * tau_ - (1 / T_), -1000, -1000, -1000;
-  ub_QP_ << 1000, 1000, 1000, lambda_L_ * (max_L_ - L_),
-      lambda_tau_ * (max_tau_ - tau_) - (1 / T_), 1000, 1000, 1000;
+  lb_QP_ << -100, -100, -100, lambda_L_ * (W_ - L_),
+      -lambda_tau_ * tau_ - (1 / T_), -100, -100, -100;
+  ub_QP_ << 100, 100, 100, lambda_L_ * (max_L_ - L_),
+      lambda_tau_ * (max_tau_ - tau_) - (1 / T_), 100, 100, 100;
 
   // Solve QP
   bool success = solver_.solve(H_QP_, f_QP_, Eigen::MatrixXd::Zero(0, 0),
@@ -345,8 +346,8 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
 
   // Handle QP fails
   if (not success) {
-    mc_rtc::log::warning(
-        "MinimumJerkTask's QP failed,applying worst case convergence");
+    // mc_rtc::log::warning(
+    //     "MinimumJerkTask's QP failed,applying worst case convergence");
     u_ = -K_ev_;
     qp_state = "QP_failed";
   } else {
@@ -427,8 +428,19 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
 
   // ========== QP related ========== //
   logger.addLogEntry("MinimumJerkTask_QP_state", [this]() { return qp_state; });
-  logger.addLogEntry("MinimumJerkTask_QP_linear_cost",
+  logger.addLogEntry("MinimumJerkTask_QP_state_cost_vec",
                      [this]() -> Eigen::VectorXd { return f_QP_; });
+  logger.addLogEntry("MinimumJerkTask_QP_output_cost_vec",
+                     [this]() -> Eigen::VectorXd { return H_QP_.diagonal(); });
+  logger.addLogEntry("MinimumJerkTask_QP_state_cost",
+                     [this]() -> double { return f_QP_.transpose() * u_; });
+  logger.addLogEntry("MinimumJerkTask_QP_output_cost", [this]() -> double {
+    return 0.5 * u_.transpose() * H_QP_ * u_;
+  });
+  logger.addLogEntry("MinimumJerkTask_QP_cost", [this]() -> double {
+    return 0.5 * static_cast<double>(u_.transpose() * H_QP_ * u_) +
+           static_cast<double>(f_QP_.transpose() * u_);
+  });
   logger.addLogEntry("MinimumJerkTask_QP_W1", [this]() { return W_1(); });
   logger.addLogEntry("MinimumJerkTask_QP_W2", [this]() { return W_2(); });
 
@@ -448,6 +460,18 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
                      [this]() -> Eigen::Vector3d { return ref_acc_; });
   logger.addLogEntry("MinimumJerkTask_lyap_error",
                      [this]() -> Eigen::VectorXd { return err_lyap_; });
+  logger.addLogEntry("MinimumJerkTask_lyap_pred_dyn",
+                     [this]() -> Eigen::VectorXd { return dev_pred_; });
+  logger.addLogEntry("MinimumJerkTask_lyap_diff_dyn",
+                     [this]() -> Eigen::VectorXd { return dev_diff_; });
+  logger.addLogEntry("MinimumJerkTask_lyap_dyn_error_vec",
+                     [this]() -> Eigen::VectorXd { return dyn_error_; });
+  logger.addLogEntry("MinimumJerkTask_lyap_dyn_error_norm",
+                     [this]() { return dyn_error_.norm(); });
+  logger.addLogEntry("MinimumJerkTask_BodyAccB",
+                     [this]() { return acc_body_; });
+  logger.addLogEntry("MinimumJerkTask_BodyVelB",
+                     [this]() { return vel_body_; });
   // PositionTask::addToLogger(logger);
 }
 
@@ -491,15 +515,20 @@ void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
           "QP output", {"jx", "jy", "jz", "length", "phase", "Dx", "Dy", "Dz"},
           [this]() { return u_; }),
       mc_rtc::gui::ArrayLabel(
-          "MjState", {"ex", "ey", "ez", "vx", "vy", "vz", "ax", "ay", "az"},
-          [this]() { return mj_pose_; }));
+          "Robot error", {"ex", "ey", "ez", "vx", "vy", "vz", "ax", "ay", "az"},
+          [this]() -> Eigen::VectorXd { return x_.head<9>(); }),
+      mc_rtc::gui::ArrayLabel(
+          "MJ error", {"ex", "ey", "ez", "vx", "vy", "vz", "ax", "ay", "az"},
+          [this]() { return err_mj_; }),
+      mc_rtc::gui::ArrayLabel("MjState", {"ex", "ey", "ez"},
+                              [this]() { return mj_pose_; }));
   gui.addElement(
       {"Tasks", name_, "Visual"},
       mc_rtc::gui::Arrow(
           "MJ Direction",
           mc_rtc::gui::ArrowConfig(mc_rtc::gui::Color(0.0, 0.0, 1.0, 0.3)),
           [this]() -> Eigen::Vector3d { return target_pos_; },
-          [this]() -> Eigen::Vector3d { return target_pos_ - 0.2 * D_; }),
+          [this]() -> Eigen::Vector3d { return target_pos_ + 0.2 * D_; }),
       mc_rtc::gui::Arrow(
           "Acc Direction",
           mc_rtc::gui::ArrowConfig(mc_rtc::gui::Color(0.0, 1.0, 0.0, 0.3)),
