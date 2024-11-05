@@ -17,9 +17,11 @@ MinimumJerkTask::MinimumJerkTask(const std::string &bodyName,
 MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
                                  double weight)
     : PositionTask(frame, 0.0, weight), frame_(frame),
-      bodyName_(frame_->body()), init_(true), qp_state("QP_success"), W_(0.03),
-      max_L_(2.0), max_tau_(0.999), lambda_L_(100), lambda_tau_(100),
-      fitts_a_(0), fitts_b_(1.0),
+      bodyName_(frame_->body()), init_(true), gamma_state_(1.0),
+      gamma_output_(1.0), qp_state("QP_success"), W_(0.03), max_L_(2.0),
+      max_tau_(0.999), lambda_L_(100), lambda_tau_(100), fitts_a_(0),
+      fitts_b_(1.0), max_jac_tau_(1.0), lambda_jac_L_(1e-4),
+      lambda_jac_tau_(0.1875), lambda_jac_D_(0.001), gain_linear_cost_(1.0),
       jac_(new rbd::Jacobian(frame.robot().mb(), frame.body())), solver_() {
   switch (backend_) {
   case Backend::TVM:
@@ -32,8 +34,10 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
   type_ = "min_jerk";
   name_ = "min_jerk_" + frame.robot().name() + "_" + frame.name();
 
-  W_1_.setZero();
-  W_2_.setZero();
+  LQR_Q_.setZero();
+  LQR_R_.setZero();
+  W_e_.setZero();
+  W_u_.setZero();
   K_.setZero();
   P_.setZero();
   Q_.setZero();
@@ -51,13 +55,17 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
   commanded_acc_.setZero();
   disturbance_acc_.setZero();
 
-  W_1_.block<3, 3>(0, 0) = 1e6 * Eigen::Matrix3d::Identity();
-  W_1_.block<3, 3>(3, 3) = 1e6 * Eigen::Matrix3d::Identity();
-  W_1_.block<3, 3>(6, 6) = 1e0 * Eigen::Matrix3d::Identity();
-  W_2_.block<3, 3>(0, 0) = 1e0 * Eigen::Matrix3d::Identity();
-  W_2_(3, 3) = 1e2;
-  W_2_(4, 4) = 1e1;
-  W_2_.block<3, 3>(5, 5) = 1e1 * Eigen::Matrix3d::Identity();
+  LQR_Q_.block<3, 3>(0, 0) = 1e6 * Eigen::Matrix3d::Identity();
+  LQR_Q_.block<3, 3>(3, 3) = 1e6 * Eigen::Matrix3d::Identity();
+  LQR_Q_.block<3, 3>(6, 6) = 1e0 * Eigen::Matrix3d::Identity();
+  LQR_R_ = 1e0 * Eigen::Matrix3d::Identity();
+  W_e_.block<3, 3>(0, 0) = 1e6 * Eigen::Matrix3d::Identity();
+  W_e_.block<3, 3>(3, 3) = 1e6 * Eigen::Matrix3d::Identity();
+  W_e_.block<3, 3>(6, 6) = 1e0 * Eigen::Matrix3d::Identity();
+  W_u_.block<3, 3>(0, 0) = 1e0 * Eigen::Matrix3d::Identity();
+  W_u_(3, 3) = 1e2;
+  W_u_(4, 4) = 1e1;
+  W_u_.block<3, 3>(5, 5) = 1e1 * Eigen::Matrix3d::Identity();
 
   A_.setZero();
   B_.setZero();
@@ -76,7 +84,7 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
   tau_ = 0.0;
   x_(10) = tau_;
 
-  H_QP_ = 2 * W_2_.transpose() * W_2_;
+  H_QP_ = 2 * W_u_.transpose() * W_u_;
 }
 
 void MinimumJerkTask::computeDuration(void) {
@@ -113,8 +121,7 @@ void MinimumJerkTask::computeF(void) {
 }
 
 void MinimumJerkTask::updateB(void) {
-  double tau = (tau_ > 0.7) ? 0.7 : tau_;
-  mc_rtc::log::info("tau = {} | used tau = {}", tau_, tau);
+  double tau = (tau_ > max_jac_tau_) ? max_jac_tau_ : tau_;
   double tau2 = tau * tau;  // tau^2
   double tau3 = tau2 * tau; // tau^3
   double tau4 = tau3 * tau; // tau^4
@@ -124,10 +131,13 @@ void MinimumJerkTask::updateB(void) {
   SD << 0, -D_(2), D_(1), D_(2), 0, -D_(0), -D_(1), D_(0), 0;
 
   // Jacobian for position error
-  B_.block<3, 1>(0, 3) = (6.0 * tau5 - 15.0 * tau4 + 10.0 * tau3 - 1.0) * D_;
-  B_.block<3, 1>(0, 4) = L_ * (30.0 * tau4 - 60.0 * tau3 + 30.0 * tau2) * D_;
+  B_.block<3, 1>(0, 3) =
+      (6.0 * tau5 - 15.0 * tau4 + 10.0 * tau3 - 1.0) * D_ - lambda_jac_L_ * D_;
+  B_.block<3, 1>(0, 4) = L_ * (30.0 * tau4 - 60.0 * tau3 + 30.0 * tau2) * D_ +
+                         L_ * lambda_jac_tau_ * D_;
   B_.block<3, 3>(0, 5) =
-      L_ * (6.0 * tau5 - 15.0 * tau4 + 10.0 * tau3 - 1.0) * SD;
+      L_ * (6.0 * tau5 - 15.0 * tau4 + 10.0 * tau3 - 1.0) * SD -
+      lambda_jac_D_ * SD;
 
   // Jacobian for velocity error
   B_.block<3, 1>(3, 3) = -((30 * tau4 - 60 * tau3 + 30 * tau2) *
@@ -157,8 +167,8 @@ void MinimumJerkTask::updateG(void) {
 void MinimumJerkTask::solveLQR(void) {
   auto A = A_;
   auto B = B_.block<9, 3>(0, 0);
-  auto R = W_2_.block<3, 3>(0, 0);
-  auto Q = W_1_;
+  auto R = LQR_R_;
+  auto Q = LQR_Q_;
 
   size_t n = static_cast<size_t>(A.rows());
 
@@ -240,7 +250,7 @@ void MinimumJerkTask::solveLQR(void) {
   // Check lyapunov
   Eigen::MatrixXd Q_lyap = (R.inverse() * B.transpose() * P).transpose() * R *
                                (R.inverse() * B.transpose() * P) +
-                           W_1_;
+                           LQR_Q_;
   Eigen::MatrixXd lyap =
       Q_lyap + P * (A - B * (R.inverse() * B.transpose() * P)) +
       (A - B * (R.inverse() * B.transpose() * P)).transpose() * P;
@@ -276,23 +286,19 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   Eigen::Vector3d vel = robot.bodyVelW(bodyName_).linear();
   Eigen::Vector3d acc =
       transform.rotation().transpose() * robot.bodyAccB(bodyName_).linear() +
-      robot.bodyVelW(bodyName_).angular().cross(vel);
-  acc_body_ = robot.bodyAccB(bodyName_);
-  vel_body_ = robot.bodyVelB(bodyName_);
-  if (dist_acc_before_) {
-    acc -= disturbance_acc_.tail<3>();
-  }
+      robot.bodyVelW(bodyName_).angular().cross(vel) -
+      gamma_state_ * disturbance_acc_.tail<3>();
   // Eigen::Vector3d acc =
   //     transform.rotation().transpose() * robot.bodyAccB(bodyName_).linear();
   //     NOT CORRECT
 
   Eigen::Vector3d err = target_pos_ - curr_pos_;
   if (init_) {
-    D_ << err / err.norm();
+    D_ << -err / err.norm();
     x_.block<3, 1>(11, 0) = D_;
-    L_ = err.norm();
-    x_(9) = 0.75 * L_;
-    tau_ = 0.5;
+    L_ = std::max(err.norm(), W_);
+    x_(9) = L_;
+    tau_ = 0.0;
     x_(10) = tau_;
     reaction_time_counter_ = 0;
     commanded_acc_.setZero();
@@ -331,7 +337,7 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   updateG();
 
   // Compute the matrices to put in the QP
-  f_QP_ = err_lyap_.transpose() * W_1_ * B_;
+  f_QP_ = gain_linear_cost_ * err_lyap_.transpose() * W_e_ * P_ * B_;
   A_QP_ = err_lyap_.transpose() * P_ * B_;
   b_QP_ = -err_lyap_.transpose() * P_ * B_ * K_ev_;
   lb_QP_ << -100, -100, -100, lambda_L_ * (W_ - L_),
@@ -364,8 +370,7 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   x_ = x_ + dx_ * solver.dt();
   x_.tail<3>().normalize();
   commanded_acc_ = commanded_acc_ + dx_.block<3, 1>(6, 0) * solver.dt();
-  ref_acc_ =
-      -commanded_acc_ + compensation_factor_ * disturbance_acc_.tail<3>();
+  ref_acc_ = -commanded_acc_ + gamma_output_ * disturbance_acc_.tail<3>();
 
   // Set PositionTask's refAccel
   PositionTask::refAccel(ref_acc_);
@@ -375,131 +380,150 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
 
 void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
   // ========== State logging ========== //
-  logger.addLogEntry("MinimumJerkTask_state_error_pos",
+  logger.addLogEntry("MinimumJerkTask_state_error_pos", this,
                      [this]() -> Eigen::Vector3d { return x_.head<3>(); });
   logger.addLogEntry(
-      "MinimumJerkTask_state_error_vel",
+      "MinimumJerkTask_state_error_vel", this,
       [this]() -> Eigen::Vector3d { return x_.block<3, 1>(3, 0); });
   logger.addLogEntry(
-      "MinimumJerkTask_state_error_acc",
+      "MinimumJerkTask_state_error_acc", this,
       [this]() -> Eigen::Vector3d { return x_.block<3, 1>(6, 0); });
-  logger.addLogEntry("MinimumJerkTask_state_traj_length",
+  logger.addLogEntry("MinimumJerkTask_state_traj_length", this,
                      [this]() -> double { return x_(9); });
-  logger.addLogEntry("MinimumJerkTask_state_traj_phase",
+  logger.addLogEntry("MinimumJerkTask_state_traj_phase", this,
                      [this]() -> double { return x_(10); });
-  logger.addLogEntry("MinimumJerkTask_state_traj_direction",
+  logger.addLogEntry("MinimumJerkTask_state_traj_direction", this,
                      [this]() -> Eigen::Vector3d { return x_.tail<3>(); });
 
   // ========== State derivative logging ========== //
-  logger.addLogEntry("MinimumJerkTask_stateD_error_vel",
+  logger.addLogEntry("MinimumJerkTask_stateD_error_vel", this,
                      [this]() -> Eigen::Vector3d { return dx_.head<3>(); });
   logger.addLogEntry(
-      "MinimumJerkTask_stateD_error_acc",
+      "MinimumJerkTask_stateD_error_acc", this,
       [this]() -> Eigen::Vector3d { return dx_.block<3, 1>(3, 0); });
   logger.addLogEntry(
-      "MinimumJerkTask_stateD_error_jerk",
+      "MinimumJerkTask_stateD_error_jerk", this,
       [this]() -> Eigen::Vector3d { return dx_.block<3, 1>(6, 0); });
-  logger.addLogEntry("MinimumJerkTask_stateD_traj_length",
+  logger.addLogEntry("MinimumJerkTask_stateD_traj_length", this,
                      [this]() -> double { return dx_(9); });
-  logger.addLogEntry("MinimumJerkTask_stateD_traj_phase",
+  logger.addLogEntry("MinimumJerkTask_stateD_traj_phase", this,
                      [this]() -> double { return dx_(10); });
-  logger.addLogEntry("MinimumJerkTask_stateD_traj_direction",
+  logger.addLogEntry("MinimumJerkTask_stateD_traj_direction", this,
                      [this]() -> Eigen::Vector3d { return dx_.tail<3>(); });
 
   // ========== Minimum Jerk traj related ========== //
-  logger.addLogEntry("MinimumJerkTask_minimum_jerk_state_error",
+  logger.addLogEntry("MinimumJerkTask_minimum_jerk_state_error", this,
                      [this]() -> Eigen::Vector3d { return err_mj_.head<3>(); });
   logger.addLogEntry(
-      "MinimumJerkTask_minimum_jerk_state_vel",
+      "MinimumJerkTask_minimum_jerk_state_vel", this,
       [this]() -> Eigen::Vector3d { return err_mj_.block<3, 1>(3, 0); });
-  logger.addLogEntry("MinimumJerkTask_minimum_jerk_state_acc",
+  logger.addLogEntry("MinimumJerkTask_minimum_jerk_state_acc", this,
                      [this]() -> Eigen::Vector3d { return err_mj_.tail<3>(); });
-  logger.addLogEntry("MinimumJerkTask_minimum_jerk_duration",
+  logger.addLogEntry("MinimumJerkTask_minimum_jerk_duration", this,
                      [this]() { return T_; });
 
   // ========== Fitts related ========== //
-  logger.addLogEntry("MinimumJerkTask_Fitts_a", [this]() { return fitts_a_; });
-  logger.addLogEntry("MinimumJerkTask_Fitts_b", [this]() { return fitts_b_; });
-  logger.addLogEntry("MinimumJerkTask_Fitts_W", [this]() { return W_; });
-  logger.addLogEntry("MinimumJerkTask_Fitts_duration",
+  logger.addLogEntry("MinimumJerkTask_Fitts_a", this,
+                     [this]() { return fitts_a_; });
+  logger.addLogEntry("MinimumJerkTask_Fitts_b", this,
+                     [this]() { return fitts_b_; });
+  logger.addLogEntry("MinimumJerkTask_Fitts_W", this, [this]() { return W_; });
+  logger.addLogEntry("MinimumJerkTask_Fitts_duration", this,
                      [this]() { return T_fitts_; });
-  logger.addLogEntry("MinimumJerkTask_Fitts_reaction_time",
+  logger.addLogEntry("MinimumJerkTask_Fitts_reaction_time", this,
                      [this]() { return reaction_time_; });
 
   // ========== QP related ========== //
-  logger.addLogEntry("MinimumJerkTask_QP_state", [this]() { return qp_state; });
-  logger.addLogEntry("MinimumJerkTask_QP_state_cost_vec",
+  logger.addLogEntry("MinimumJerkTask_QP_state", this,
+                     [this]() { return qp_state; });
+  logger.addLogEntry("MinimumJerkTask_QP_state_cost_vec", this,
                      [this]() -> Eigen::VectorXd { return f_QP_; });
-  logger.addLogEntry("MinimumJerkTask_QP_output_cost_vec",
+  logger.addLogEntry("MinimumJerkTask_QP_output_cost_vec", this,
                      [this]() -> Eigen::VectorXd { return H_QP_.diagonal(); });
-  logger.addLogEntry("MinimumJerkTask_QP_state_cost",
+  logger.addLogEntry("MinimumJerkTask_QP_state_cost", this,
                      [this]() -> double { return f_QP_.transpose() * u_; });
-  logger.addLogEntry("MinimumJerkTask_QP_output_cost", [this]() -> double {
-    return 0.5 * u_.transpose() * H_QP_ * u_;
-  });
-  logger.addLogEntry("MinimumJerkTask_QP_cost", [this]() -> double {
+  logger.addLogEntry(
+      "MinimumJerkTask_QP_output_cost", this,
+      [this]() -> double { return 0.5 * u_.transpose() * H_QP_ * u_; });
+  logger.addLogEntry("MinimumJerkTask_QP_cost", this, [this]() -> double {
     return 0.5 * static_cast<double>(u_.transpose() * H_QP_ * u_) +
            static_cast<double>(f_QP_.transpose() * u_);
   });
-  logger.addLogEntry("MinimumJerkTask_QP_W1", [this]() { return W_1(); });
-  logger.addLogEntry("MinimumJerkTask_QP_W2", [this]() { return W_2(); });
+  logger.addLogEntry("MinimumJerkTask_QP_W_state", this,
+                     [this]() { return W_e(); });
+  logger.addLogEntry("MinimumJerkTask_QP_W_output", this,
+                     [this]() { return W_u(); });
 
   // ========== Other ========== //
-  logger.addLogEntry("MinimumJerkTask_target_pose",
+  logger.addLogEntry("MinimumJerkTask_target_pose", this,
                      [this]() { return target_pos_; });
-  logger.addLogEntry("MinimumJerkTask_control_signal", [this]() { return u_; });
-  logger.addLogEntry("MinimumJerkTask_err", [this]() { return eval(); });
-  logger.addLogEntry("MinimumJerkTask_err_norm",
+  logger.addLogEntry("MinimumJerkTask_control_signal", this,
+                     [this]() { return u_; });
+  logger.addLogEntry("MinimumJerkTask_err", this, [this]() { return eval(); });
+  logger.addLogEntry("MinimumJerkTask_err_norm", this,
                      [this]() { return eval().norm(); });
-  logger.addLogEntry("MinimumJerkTask_commanded_acc",
+  logger.addLogEntry("MinimumJerkTask_commanded_acc", this,
                      [this]() -> Eigen::Vector3d { return commanded_acc_; });
   logger.addLogEntry(
-      "MinimumJerkTask_disturb_acc",
+      "MinimumJerkTask_disturb_acc", this,
       [this]() -> Eigen::Vector3d { return disturbance_acc_.tail<3>(); });
-  logger.addLogEntry("MinimumJerkTask_ref_acc",
+  logger.addLogEntry("MinimumJerkTask_ref_acc", this,
                      [this]() -> Eigen::Vector3d { return ref_acc_; });
-  logger.addLogEntry("MinimumJerkTask_lyap_error",
+  logger.addLogEntry("MinimumJerkTask_lyap_error", this,
                      [this]() -> Eigen::VectorXd { return err_lyap_; });
-  logger.addLogEntry("MinimumJerkTask_lyap_pred_dyn",
+  logger.addLogEntry("MinimumJerkTask_lyap_pred_dyn", this,
                      [this]() -> Eigen::VectorXd { return dev_pred_; });
-  logger.addLogEntry("MinimumJerkTask_lyap_diff_dyn",
+  logger.addLogEntry("MinimumJerkTask_lyap_diff_dyn", this,
                      [this]() -> Eigen::VectorXd { return dev_diff_; });
-  logger.addLogEntry("MinimumJerkTask_lyap_dyn_error_vec",
+  logger.addLogEntry("MinimumJerkTask_lyap_dyn_error_vec", this,
                      [this]() -> Eigen::VectorXd { return dyn_error_; });
-  logger.addLogEntry("MinimumJerkTask_lyap_dyn_error_norm",
+  logger.addLogEntry("MinimumJerkTask_lyap_dyn_error_norm", this,
                      [this]() { return dyn_error_.norm(); });
-  logger.addLogEntry("MinimumJerkTask_BodyAccB",
-                     [this]() { return acc_body_; });
-  logger.addLogEntry("MinimumJerkTask_BodyVelB",
-                     [this]() { return vel_body_; });
   // PositionTask::addToLogger(logger);
 }
 
 void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
   gui.addElement(
-      {"Tasks", name_, "Hyperparameters"},
-      mc_rtc::gui::NumberInput("tau upper limit", max_tau_),
-      mc_rtc::gui::NumberInput("Fitts's constant (a)", fitts_a_),
-      mc_rtc::gui::NumberInput("Fitts's proportional (b)", fitts_b_),
-      mc_rtc::gui::NumberInput("Reaction time", reaction_time_),
-      mc_rtc::gui::NumberInput("Compensation factor", compensation_factor_),
-      mc_rtc::gui::Checkbox("Pre uncompensate?", dist_acc_before_));
-  gui.addElement(
-      {"Tasks", name_, "Gains"},
-      mc_rtc::gui::ArrayInput(
-          "State weight",
-          {"ex", "ey", "ez", "vx", "vy", "vz", "ax", "ay", "az"},
-          [this]() { return W_1(); }, [this](Eigen::VectorXd v) { W_1(v); }),
-      mc_rtc::gui::ArrayInput(
-          "Input weight", {"Jx", "Jy", "Jz", "L", "tau", "Dx", "Dy", "Dz"},
-          [this]() { return W_2(); }, [this](Eigen::VectorXd v) { W_2(v); }),
-      mc_rtc::gui::ArrayLabel(
-          "Lyapunov error",
-          {"ex", "ey", "ez", "vx", "vy", "vz", "ax", "ay", "az"},
-          [this]() { return err_lyap_; }),
-      mc_rtc::gui::ArrayLabel(
-          "QP output", {"jx", "jy", "jz", "length", "phase", "Dx", "Dy", "Dz"},
-          [this]() { return u_; }));
+      {"Tasks", name_, "Hyperparameters", "Controller"},
+      mc_rtc::gui::NumberInput("Max tau", max_tau_),
+      mc_rtc::gui::NumberInput("Jacobian's max tau", max_jac_tau_),
+      mc_rtc::gui::NumberInput("Jacobians damping on L", lambda_jac_L_),
+      mc_rtc::gui::NumberInput("Jacobians damping on tau", lambda_jac_tau_),
+      mc_rtc::gui::NumberInput("Jacobians damping on D", lambda_jac_D_),
+      mc_rtc::gui::NumberInput("Linear cost gain [0;1]", gain_linear_cost_),
+      mc_rtc::gui::NumberInput("Input gamma", gamma_state_),
+      mc_rtc::gui::NumberInput("Output gamma", gamma_output_));
+  gui.addElement({"Tasks", name_, "Hyperparameters", "Fitts"},
+                 mc_rtc::gui::NumberInput("Fitts's constant (a)", fitts_a_),
+                 mc_rtc::gui::NumberInput("Fitts's proportional (b)", fitts_b_),
+                 mc_rtc::gui::NumberInput("Reaction time", reaction_time_));
+  gui.addElement({"Tasks", name_, "Gains"},
+                 mc_rtc::gui::ArrayInput(
+                     "LQR weight", {"e", "v", "a", "j"},
+                     [this]() -> Eigen::Vector4d {
+                       auto wq = LQR_Q();
+                       return Eigen::Vector4d(wq(0), wq(1), wq(2), LQR_R());
+                     },
+                     [this](Eigen::Vector4d v) {
+                       LQR_Q(v.head(3));
+                       LQR_R(v(3));
+                     }),
+                 mc_rtc::gui::ArrayInput(
+                     "QP state weight", {"e", "v", "a"},
+                     [this]() -> Eigen::Vector3d { return W_e(); },
+                     [this](Eigen::Vector3d v) { W_e(v); }),
+                 mc_rtc::gui::ArrayInput(
+                     "QP output weight", {"J", "L", "tau", "D"},
+                     [this]() -> Eigen::Vector4d { return W_u(); },
+                     [this](Eigen::Vector4d v) { W_u(v); }),
+                 mc_rtc::gui::ArrayLabel(
+                     "Lyapunov error",
+                     {"ex", "ey", "ez", "vx", "vy", "vz", "ax", "ay", "az"},
+                     [this]() { return err_lyap_; }),
+                 mc_rtc::gui::ArrayLabel(
+                     "QP output",
+                     {"jx", "jy", "jz", "length", "phase", "Dx", "Dy", "Dz"},
+                     [this]() { return u_; }));
   gui.addElement(
       {"Tasks", name_, "Computed"},
       mc_rtc::gui::Label("Trajectory length", [this]() { return L_; }),
@@ -528,13 +552,13 @@ void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
           "MJ Direction",
           mc_rtc::gui::ArrowConfig(mc_rtc::gui::Color(0.0, 0.0, 1.0, 0.3)),
           [this]() -> Eigen::Vector3d { return target_pos_; },
-          [this]() -> Eigen::Vector3d { return target_pos_ + 0.2 * D_; }),
+          [this]() -> Eigen::Vector3d { return target_pos_ + 0.1 * D_; }),
       mc_rtc::gui::Arrow(
           "Acc Direction",
           mc_rtc::gui::ArrowConfig(mc_rtc::gui::Color(0.0, 1.0, 0.0, 0.3)),
           [this]() -> Eigen::Vector3d { return curr_pos_; },
           [this]() -> Eigen::Vector3d {
-            return curr_pos_ - 0.2 * x_.block<3, 1>(6, 0).normalized();
+            return curr_pos_ - 0.1 * x_.block<3, 1>(6, 0).normalized();
           }),
       mc_rtc::gui::Point3DRO("Target position", target_pos_),
       mc_rtc::gui::Point3DRO(

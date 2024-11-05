@@ -79,22 +79,47 @@ public:
 
   inline double lambda_tau(void) { return lambda_tau_; }
 
-  inline void W_1(Eigen::VectorXd W) {
-    W_1_ = W.asDiagonal();
+  inline void LQR_Q(Eigen::Vector3d v) {
+    LQR_Q_.block<3, 3>(0, 0).diagonal().setConstant(v(0));
+    LQR_Q_.block<3, 3>(3, 3).diagonal().setConstant(v(1));
+    LQR_Q_.block<3, 3>(6, 6).diagonal().setConstant(v(2));
     solveLQR();
     computeQ();
   }
 
-  inline Eigen::VectorXd W_1(void) { return W_1_.diagonal(); }
+  inline Eigen::Vector3d LQR_Q(void) {
+    return Eigen::Vector3d(LQR_Q_(0, 0), LQR_Q_(3, 3), LQR_Q_(6, 6));
+  }
 
-  inline void W_2(Eigen::VectorXd W) {
-    W_2_ = W.asDiagonal();
-    H_QP_ = 2 * W_2_.transpose() * W_2_;
+  inline void LQR_R(double w) {
+    LQR_R_.diagonal().setConstant(w);
     solveLQR();
     computeQ();
   }
 
-  inline Eigen::VectorXd W_2(void) { return W_2_.diagonal(); }
+  inline double LQR_R(void) { return LQR_R_(0, 0); }
+
+  inline void W_e(Eigen::Vector3d W) {
+    W_e_.block<3, 3>(0, 0).diagonal().setConstant(W(0));
+    W_e_.block<3, 3>(3, 3).diagonal().setConstant(W(1));
+    W_e_.block<3, 3>(6, 6).diagonal().setConstant(W(2));
+  }
+
+  inline Eigen::Vector3d W_e(void) {
+    return Eigen::Vector3d(W_e_(0, 0), W_e_(3, 3), W_e_(6, 6));
+  }
+
+  inline void W_u(Eigen::Vector4d W) {
+    W_u_.block<3, 3>(0, 0).diagonal().setConstant(W(0));
+    W_u_(3, 3) = W(1);
+    W_u_(4, 4) = W(2);
+    W_u_.block<3, 3>(5, 5).diagonal().setConstant(W(3));
+    H_QP_ = 2 * W_u_.transpose() * W_u_;
+  }
+
+  inline Eigen::Vector4d W_u(void) {
+    return Eigen::Vector4d(W_u_(0, 0), W_u_(3, 3), W_u_(4, 4), W_u_(5, 5));
+  }
 
   inline void K(Eigen::Matrix<double, 3, 9> K) {
     K_ = K;
@@ -111,9 +136,7 @@ public:
 
   inline Eigen::MatrixXd Q(void) { return Q_; }
 
-  inline void computeQ(void) {
-    Q_ = K_.transpose() * W_2_.block<3, 3>(0, 0) * K_ + W_1_;
-  }
+  inline void computeQ(void) { Q_ = K_.transpose() * LQR_R_ * K_ + LQR_Q_; }
 
   inline void fitts_a(double a) { fitts_a_ = a; }
 
@@ -153,15 +176,14 @@ protected:
   void updateG(void);
 
   void solveLQR(void);
-  void computeLQRGain(void);
 
   std::string bodyName_;
   Eigen::Vector3d target_pos_;
   Eigen::Vector3d curr_pos_;
 
   bool init_;
-  bool dist_acc_before_;
-  double compensation_factor_;
+  double gamma_state_;
+  double gamma_output_;
   std::string qp_state;
 
   // Control parameters
@@ -170,17 +192,21 @@ protected:
   double max_tau_;
   double lambda_L_;
   double lambda_tau_;
-  Eigen::Matrix<double, 9, 9> W_1_;
-  Eigen::Matrix<double, 8, 8> W_2_;
+  Eigen::Matrix<double, 9, 9> LQR_Q_;
+  Eigen::Matrix<double, 3, 3> LQR_R_;
+  Eigen::Matrix<double, 9, 9> W_e_;
+  Eigen::Matrix<double, 8, 8> W_u_;
   Eigen::Matrix<double, 3, 9> K_;
   Eigen::Matrix<double, 9, 9> P_;
   Eigen::Matrix<double, 9, 9> Q_;
   double fitts_a_;
   double fitts_b_;
   double reaction_time_;
-
-  sva::MotionVecd acc_body_;
-  sva::MotionVecd vel_body_;
+  double max_jac_tau_;
+  double lambda_jac_L_;
+  double lambda_jac_tau_;
+  double lambda_jac_D_;
+  double gain_linear_cost_;
 
   // Control variables
   double L_;
