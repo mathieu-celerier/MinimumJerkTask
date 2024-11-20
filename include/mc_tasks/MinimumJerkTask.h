@@ -31,7 +31,8 @@ public:
    *
    * \param weight Task weight
    */
-  MinimumJerkTask(const mc_rbdyn::RobotFrame &frame, double weight);
+  MinimumJerkTask(const mc_rbdyn::RobotFrame &frame, double weight,
+                  bool useFilter = false);
 
   /*! \brief Constructor
    *
@@ -47,7 +48,8 @@ public:
    *
    */
   MinimumJerkTask(const std::string &bodyName, const mc_rbdyn::Robots &robots,
-                  unsigned int robotIndex, double weight);
+                  unsigned int robotIndex, double weight,
+                  bool useFilter = false);
 
   inline void W(double w) {
     if (w <= 0.0)
@@ -150,6 +152,8 @@ public:
 
   inline double react_time(void) { return reaction_time_; }
 
+  inline void set_gamma(double g) { gamma_state_ = g; };
+
   inline void setTarget(Eigen::Vector3d pos) {
     target_pos_ = pos;
     init_ = true;
@@ -240,6 +244,8 @@ protected:
   Eigen::Matrix<double, 1, 1> b_QP_;
   Eigen::Matrix<double, 8, 1> lb_QP_;
   Eigen::Matrix<double, 8, 1> ub_QP_;
+
+  bool filter_out;
 
   // External forces
   rbd::Jacobian *jac_;

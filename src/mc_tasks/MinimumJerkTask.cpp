@@ -11,17 +11,19 @@ namespace mc_tasks {
 
 MinimumJerkTask::MinimumJerkTask(const std::string &bodyName,
                                  const mc_rbdyn::Robots &robots,
-                                 unsigned int robotIndex, double weight)
+                                 unsigned int robotIndex, double weight,
+                                 bool useFilter)
     : MinimumJerkTask(robots.robot(robotIndex).frame(bodyName), weight) {}
 
 MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
-                                 double weight)
+                                 double weight, bool useFilter)
     : PositionTask(frame, 0.0, weight), frame_(frame),
       bodyName_(frame_->body()), init_(true), gamma_state_(1.0),
       gamma_output_(1.0), qp_state("QP_success"), W_(0.03), max_L_(2.0),
       max_tau_(0.999), lambda_L_(100), lambda_tau_(100), fitts_a_(0),
-      fitts_b_(1.0), max_jac_tau_(1.0), lambda_jac_L_(1e-4),
-      lambda_jac_tau_(0.1875), lambda_jac_D_(0.001), gain_linear_cost_(1.0),
+      fitts_b_(1.0), max_jac_tau_(1.0), lambda_jac_L_(1e-2),
+      lambda_jac_tau_(0.1875), lambda_jac_D_(0.01), gain_linear_cost_(1.0),
+      filter_out(useFilter),
       jac_(new rbd::Jacobian(frame.robot().mb(), frame.body())), solver_() {
   switch (backend_) {
   case Backend::TVM:
