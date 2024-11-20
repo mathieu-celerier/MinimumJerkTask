@@ -11,8 +11,7 @@ namespace mc_tasks {
 
 MinimumJerkTask::MinimumJerkTask(const std::string &bodyName,
                                  const mc_rbdyn::Robots &robots,
-                                 unsigned int robotIndex, double weight,
-                                 bool useFilter)
+                                 unsigned int robotIndex, double weight)
     : MinimumJerkTask(robots.robot(robotIndex).frame(bodyName), weight) {}
 
 MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,

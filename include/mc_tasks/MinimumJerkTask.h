@@ -48,8 +48,7 @@ public:
    *
    */
   MinimumJerkTask(const std::string &bodyName, const mc_rbdyn::Robots &robots,
-                  unsigned int robotIndex, double weight,
-                  bool useFilter = false);
+                  unsigned int robotIndex, double weight);
 
   inline void W(double w) {
     if (w <= 0.0)
