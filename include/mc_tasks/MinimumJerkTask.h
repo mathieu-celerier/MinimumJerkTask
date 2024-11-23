@@ -16,6 +16,8 @@
 #include <mc_rtc/gui/Checkbox.h>
 #include <mc_rtc/gui/Label.h>
 #include <mc_rtc/gui/NumberInput.h>
+#include <mc_rtc/gui/Sphere.h>
+#include <mc_rtc/gui/Trajectory.h>
 #include <mc_tvm/Robot.h>
 
 namespace mc_tasks {
@@ -139,6 +141,8 @@ public:
 
   inline void computeQ(void) { Q_ = K_.transpose() * LQR_R_ * K_ + LQR_Q_; }
 
+  inline void set_vel_filter_tau(double tau) { vel_filtering_tau_ = tau; }
+
   inline void fitts_a(double a) { fitts_a_ = a; }
 
   inline double fitts_a(void) { return fitts_a_; }
@@ -180,6 +184,8 @@ protected:
 
   void solveLQR(void);
 
+  std::vector<Eigen::Vector3d> computeVelTraj(void);
+
   std::string bodyName_;
   Eigen::Vector3d target_pos_;
   Eigen::Vector3d curr_pos_;
@@ -193,6 +199,8 @@ protected:
   double W_;
   double max_L_;
   double max_tau_;
+  double max_jerk_;
+  double max_omega_;
   double lambda_L_;
   double lambda_tau_;
   Eigen::Matrix<double, 9, 9> LQR_Q_;
@@ -210,6 +218,8 @@ protected:
   double lambda_jac_tau_;
   double lambda_jac_D_;
   double gain_linear_cost_;
+  double vel_filtering_tau_;
+  bool filter_velocity_;
 
   // Control variables
   double L_;
@@ -235,6 +245,9 @@ protected:
   Eigen::Matrix<double, 9, 1> dev_pred_;
   Eigen::Matrix<double, 9, 1> dev_diff_;
   Eigen::Matrix<double, 9, 1> dyn_error_;
+  Eigen::Vector3d filtered_vel_;
+  Eigen::Vector3d filtered_acc_;
+  Eigen::Vector3d vel_hat;
 
   // QP matrices
   Eigen::Matrix<double, 8, 8> H_QP_;

@@ -18,10 +18,11 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
                                  double weight, bool useFilter)
     : PositionTask(frame, 0.0, weight), frame_(frame),
       bodyName_(frame_->body()), init_(true), gamma_state_(1.0),
-      gamma_output_(1.0), qp_state("QP_success"), W_(0.03), max_L_(2.0),
-      max_tau_(0.999), lambda_L_(100), lambda_tau_(100), fitts_a_(0),
-      fitts_b_(1.0), max_jac_tau_(1.0), lambda_jac_L_(1e-2),
-      lambda_jac_tau_(0.1875), lambda_jac_D_(0.01), gain_linear_cost_(1.0),
+      gamma_output_(0.0), qp_state("QP_success"), W_(0.03), max_L_(2.0),
+      max_tau_(0.999), max_jerk_(25), max_omega_(10), lambda_L_(100),
+      lambda_tau_(100), fitts_a_(0), fitts_b_(1.0), max_jac_tau_(1.0),
+      lambda_jac_L_(1e-2), lambda_jac_tau_(0.1875), lambda_jac_D_(0.01),
+      gain_linear_cost_(1.0), vel_filtering_tau_(0.0), filter_velocity_(false),
       filter_out(useFilter),
       jac_(new rbd::Jacobian(frame.robot().mb(), frame.body())), solver_() {
   switch (backend_) {
@@ -31,7 +32,6 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
     mc_rtc::log::error_and_throw(
         "[MinimumJerkTask] Not implemented for backend: {}", backend_);
   }
-  mc_rtc::log::info("[MinimumJerkTask] Checked backend");
   type_ = "min_jerk";
   name_ = "min_jerk_" + frame.robot().name() + "_" + frame.name();
 
@@ -55,6 +55,9 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
   D_.setZero();
   commanded_acc_.setZero();
   disturbance_acc_.setZero();
+  filtered_vel_.setZero();
+  filtered_acc_.setZero();
+  vel_hat.setZero();
 
   LQR_Q_.block<3, 3>(0, 0) = 1e6 * Eigen::Matrix3d::Identity();
   LQR_Q_.block<3, 3>(3, 3) = 1e6 * Eigen::Matrix3d::Identity();
@@ -176,7 +179,7 @@ void MinimumJerkTask::solveLQR(void) {
   // Form the Hamiltoninan matrix Z
   Eigen::MatrixXd Z(2 * n, 2 * n);
   Z << A, -B * R.inverse() * B.transpose(), -Q, -A.transpose();
-  mc_rtc::log::info("Z matrix: {}", Z);
+  // mc_rtc::log::info("Z matrix: {}", Z);
   std::vector<int> stable_indices;
   Eigen::MatrixXcd eigenvalues;
   Eigen::MatrixXcd eigenvectors;
@@ -188,7 +191,7 @@ void MinimumJerkTask::solveLQR(void) {
     eigenvectors = eig_solver.eigenvectors();
 
     // Print eigenvalues for debugging
-    std::cout << "Eigenvalues of Z:\n" << eigenvalues << "\n\n";
+    // std::cout << "Eigenvalues of Z:\n" << eigenvalues << "\n\n";
 
     // Select the stable eigenvectors (corresponding to eigenvalues with
     // negative real parts)
@@ -217,10 +220,11 @@ void MinimumJerkTask::solveLQR(void) {
   // Form the stable subspace using the stable eigenvectors
   Eigen::MatrixXcd V_stable(2 * n, n);
   for (size_t i = 0; i < n; ++i) {
-    std::cout << "Selected eigenvalue: " << eigenvalues(stable_indices[i])
-              << std::endl;
-    std::cout << "Associated eigenvector: "
-              << eigenvectors.col(stable_indices[i]).head(int(n)) << std::endl;
+    // std::cout << "Selected eigenvalue: " << eigenvalues(stable_indices[i])
+    //           << std::endl;
+    // std::cout << "Associated eigenvector: "
+    //           << eigenvectors.col(stable_indices[i]).head(int(n)) <<
+    //           std::endl;
     V_stable.col(int(i)) = eigenvectors.col(stable_indices[i]);
   }
 
@@ -261,7 +265,7 @@ void MinimumJerkTask::solveLQR(void) {
     K_ = R.inverse() * B.transpose() * P_;
     mc_rtc::log::info("[MinimumJerkTask] Solved LQR");
     Eigen::IOFormat format(5, 0, " ", "\n", "[", "]", "", "");
-    std::cout << "P matrix\n" << P_.format(format) << "\n";
+    // std::cout << "P matrix\n" << P_.format(format) << "\n";
     std::cout << "K matrix\n" << K_.format(format) << "\n";
     computeQ();
   } else {
@@ -290,8 +294,13 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
       robot.bodyVelW(bodyName_).angular().cross(vel) -
       gamma_state_ * disturbance_acc_.tail<3>();
   // Eigen::Vector3d acc =
-  //     transform.rotation().transpose() * robot.bodyAccB(bodyName_).linear();
-  //     NOT CORRECT
+  //     transform.rotation().transpose() *
+  //     robot.bodyAccB(bodyName_).linear(); NOT CORRECT
+
+  double alpha = 1 - exp(-solver.dt() / vel_filtering_tau_);
+  filtered_vel_ += alpha * (vel - filtered_vel_);
+  filtered_acc_ += alpha * (acc - filtered_acc_);
+  vel_hat = filtered_vel_ + vel_filtering_tau_ * filtered_acc_;
 
   Eigen::Vector3d err = target_pos_ - curr_pos_;
   if (init_) {
@@ -307,7 +316,7 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   }
 
   x_.block<3, 1>(0, 0) = err;
-  x_.block<3, 1>(3, 0) = -vel;
+  x_.block<3, 1>(3, 0) = -(filter_velocity_ ? vel_hat : vel);
   x_.block<3, 1>(6, 0) = -acc;
 
   L_ = x_(9);
@@ -341,10 +350,11 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   f_QP_ = gain_linear_cost_ * err_lyap_.transpose() * W_e_ * P_ * B_;
   A_QP_ = err_lyap_.transpose() * P_ * B_;
   b_QP_ = -err_lyap_.transpose() * P_ * B_ * K_ev_;
-  lb_QP_ << -100, -100, -100, lambda_L_ * (W_ - L_),
-      -lambda_tau_ * tau_ - (1 / T_), -100, -100, -100;
-  ub_QP_ << 100, 100, 100, lambda_L_ * (max_L_ - L_),
-      lambda_tau_ * (max_tau_ - tau_) - (1 / T_), 100, 100, 100;
+  lb_QP_ << -max_jerk_, -max_jerk_, -max_jerk_, lambda_L_ * (W_ - L_),
+      -lambda_tau_ * tau_ - (1 / T_), -max_omega_, -max_omega_, -max_omega_;
+  ub_QP_ << max_jerk_, max_jerk_, max_jerk_, lambda_L_ * (max_L_ - L_),
+      lambda_tau_ * (max_tau_ - tau_) - (1 / T_), max_omega_, max_omega_,
+      max_omega_;
 
   // Solve QP
   bool success = solver_.solve(H_QP_, f_QP_, Eigen::MatrixXd::Zero(0, 0),
@@ -377,6 +387,37 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   PositionTask::refAccel(ref_acc_);
 
   PositionTask::update(solver);
+}
+
+std::vector<Eigen::Vector3d> MinimumJerkTask::computeVelTraj() {
+  // Create phase values (100 equally spaced points between 0 and 1)
+  const int num_points = 25;
+  std::vector<double> phase(num_points);
+  for (int i = 0; i < num_points; ++i) {
+    phase[i] = static_cast<double>(i) / (num_points - 1);
+  }
+
+  // Calculate velocity profile
+  std::vector<double> vel(num_points);
+  for (int i = 0; i < num_points; ++i) {
+    double t = phase[i];
+    vel[i] =
+        (30 * std::pow(t, 4) - 60 * std::pow(t, 3) + 30 * std::pow(t, 2)) / T_;
+  }
+
+  // Define "up" vector and calculate orthogonal vector
+  Eigen::Vector3d up(0, 0, 1);
+  Eigen::Vector3d ortho = up - (up.dot(D_)) * D_;
+  ortho.normalize();
+
+  // Calculate projected phase and velocity
+  std::vector<Eigen::Vector3d> proj_vel(num_points);
+  for (int i = 0; i < num_points; ++i) {
+    Eigen::Vector3d proj_phase = target_pos_ + (1.0 - phase[i]) * L_ * D_;
+    proj_vel[i] = proj_phase + vel[i] * 0.25 * L_ * ortho;
+  }
+
+  return proj_vel;
 }
 
 void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
@@ -455,6 +496,16 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
   logger.addLogEntry("MinimumJerkTask_QP_W_output", this,
                      [this]() { return W_u(); });
 
+  // ========== Vel filtering ========== //
+  logger.addLogEntry("MinimumJerkTask_filtered_vel", this,
+                     [this]() { return filtered_vel_; });
+  logger.addLogEntry("MinimumJerkTask_filtered_acc", this,
+                     [this]() { return filtered_acc_; });
+  logger.addLogEntry("MinimumJerkTask_filter_tau", this,
+                     [this]() { return vel_filtering_tau_; });
+  logger.addLogEntry("MinimumJerkTask_filter_is_on", this,
+                     [this]() { return filter_velocity_; });
+
   // ========== Other ========== //
   logger.addLogEntry("MinimumJerkTask_target_pose", this,
                      [this]() { return target_pos_; });
@@ -493,7 +544,9 @@ void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
       mc_rtc::gui::NumberInput("Jacobians damping on D", lambda_jac_D_),
       mc_rtc::gui::NumberInput("Linear cost gain [0;1]", gain_linear_cost_),
       mc_rtc::gui::NumberInput("Input gamma", gamma_state_),
-      mc_rtc::gui::NumberInput("Output gamma", gamma_output_));
+      mc_rtc::gui::NumberInput("Output gamma", gamma_output_),
+      mc_rtc::gui::NumberInput("Vel filter tau", vel_filtering_tau_),
+      mc_rtc::gui::Checkbox("Filter velocity ?", filter_velocity_));
   gui.addElement({"Tasks", name_, "Hyperparameters", "Fitts"},
                  mc_rtc::gui::NumberInput("Fitts's constant (a)", fitts_a_),
                  mc_rtc::gui::NumberInput("Fitts's proportional (b)", fitts_b_),
@@ -565,7 +618,15 @@ void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
       mc_rtc::gui::Point3DRO(
           "MinJerk state position",
           mc_rtc::gui::PointConfig(mc_rtc::gui::Color(0.0, 1.0, 0.0)),
-          mj_pose_));
+          mj_pose_),
+      mc_rtc::gui::Sphere(
+          "Target area", [this]() { return 0.5 * W_; },
+          [this]() { return target_pos_; },
+          mc_rtc::gui::Color(0.0, 0.0, 1.0, 0.3)),
+      mc_rtc::gui::Trajectory(
+          "Vel trajectory",
+          mc_rtc::gui::LineConfig(mc_rtc::gui::Color(1.0, 0.0, 0.0)),
+          [this]() { return computeVelTraj(); }));
   // PositionTask::addToGUI(gui);
 }
 } // namespace mc_tasks
