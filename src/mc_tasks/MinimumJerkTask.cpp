@@ -312,6 +312,12 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
     x_(10) = tau_;
     reaction_time_counter_ = 0;
     commanded_acc_.setZero();
+    // D_ = Eigen::Vector3d::Random().normalized();
+    // x_.block<3, 1>(11, 0) = D_;
+    // L_ = 2.0 * W_;
+    // x_(9) = L_;
+    // tau_ = (float)std::rand() / (float)RAND_MAX;
+    // x_(10) = tau_;
     init_ = false;
   }
 

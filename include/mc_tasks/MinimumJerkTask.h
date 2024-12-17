@@ -157,9 +157,9 @@ public:
 
   inline void set_gamma(double g) { gamma_state_ = g; };
 
-  inline void setTarget(Eigen::Vector3d pos) {
+  inline void setTarget(Eigen::Vector3d pos, bool reset = true) {
     target_pos_ = pos;
-    init_ = true;
+    init_ = reset;
     PositionTask::position(pos);
   }
 
