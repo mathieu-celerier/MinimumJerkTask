@@ -19,6 +19,7 @@
 #include <mc_rtc/gui/Sphere.h>
 #include <mc_rtc/gui/Trajectory.h>
 #include <mc_tvm/Robot.h>
+#include <random>
 
 namespace mc_tasks {
 
@@ -157,6 +158,43 @@ public:
 
   inline void set_gamma(double g) { gamma_state_ = g; };
 
+  // Function to generate a random vector in the plane perpendicular to the
+  // given vector
+  inline Eigen::Vector3d randomPerpendicularVector(const Eigen::Vector3d &v) {
+    // Normalize the given vector
+    Eigen::Vector3d v_unit = v.normalized();
+
+    // Generate a random vector
+    Eigen::Vector3d random_vec = Eigen::Vector3d::Random();
+
+    // Ensure the random vector is not parallel to v_unit
+    if (v_unit.dot(random_vec) == 0) {
+      // If orthogonal, use it directly
+      return random_vec.normalized();
+    }
+
+    // Find a vector orthogonal to v_unit using the cross product
+    Eigen::Vector3d u1 = v_unit.cross(random_vec).normalized();
+
+    // Generate another orthogonal vector using the cross product
+    Eigen::Vector3d u2 = v_unit.cross(u1).normalized();
+
+    // Generate random scalars
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dist(-1.0, 1.0);
+    double alpha = dist(gen);
+    double beta = dist(gen);
+
+    // Create a random linear combination of u1 and u2
+    Eigen::Vector3d random_perpendicular_vec = alpha * u1 + beta * u2;
+
+    // Normalize the resulting vector (optional)
+    return random_perpendicular_vec.normalized();
+  }
+
+  inline void setDisturbedInit(bool disturbed) { disturbed_init_ = disturbed; };
+
   inline void setTarget(Eigen::Vector3d pos, bool reset = true) {
     target_pos_ = pos;
     init_ = reset;
@@ -184,13 +222,14 @@ protected:
 
   void solveLQR(void);
 
-  std::vector<Eigen::Vector3d> computeVelTraj(void);
+  std::vector<Eigen::Vector3d> computeTraj(void);
 
   std::string bodyName_;
   Eigen::Vector3d target_pos_;
   Eigen::Vector3d curr_pos_;
 
   bool init_;
+  bool disturbed_init_;
   double gamma_state_;
   double gamma_output_;
   std::string qp_state;
@@ -198,6 +237,7 @@ protected:
   // Control parameters
   double W_;
   double max_L_;
+  double max_L_dot_;
   double max_tau_;
   double max_jerk_;
   double max_omega_;

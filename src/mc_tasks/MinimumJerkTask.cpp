@@ -17,13 +17,13 @@ MinimumJerkTask::MinimumJerkTask(const std::string &bodyName,
 MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
                                  double weight, bool useFilter)
     : PositionTask(frame, 0.0, weight), frame_(frame),
-      bodyName_(frame_->body()), init_(true), gamma_state_(1.0),
-      gamma_output_(0.0), qp_state("QP_success"), W_(0.03), max_L_(2.0),
-      max_tau_(0.999), max_jerk_(25), max_omega_(10), lambda_L_(100),
-      lambda_tau_(100), fitts_a_(0), fitts_b_(1.0), max_jac_tau_(1.0),
-      lambda_jac_L_(1e-2), lambda_jac_tau_(0.1875), lambda_jac_D_(0.01),
-      gain_linear_cost_(1.0), vel_filtering_tau_(0.0), filter_velocity_(false),
-      filter_out(useFilter),
+      bodyName_(frame_->body()), init_(true), disturbed_init_(false),
+      gamma_state_(1.0), gamma_output_(0.0), qp_state("QP_success"), W_(0.03),
+      max_L_(2.0), max_L_dot_(10), max_tau_(0.999), max_jerk_(25),
+      max_omega_(10), lambda_L_(100), lambda_tau_(100), fitts_a_(0),
+      fitts_b_(1.0), max_jac_tau_(1.0), lambda_jac_L_(1e-2),
+      lambda_jac_tau_(0.1875), lambda_jac_D_(0.01), gain_linear_cost_(1.0),
+      vel_filtering_tau_(0.0), filter_velocity_(false), filter_out(useFilter),
       jac_(new rbd::Jacobian(frame.robot().mb(), frame.body())), solver_() {
   switch (backend_) {
   case Backend::TVM:
@@ -304,20 +304,24 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
 
   Eigen::Vector3d err = target_pos_ - curr_pos_;
   if (init_) {
-    D_ << -err / err.norm();
-    x_.block<3, 1>(11, 0) = D_;
-    L_ = std::max(err.norm(), W_);
-    x_(9) = L_;
-    tau_ = 0.0;
-    x_(10) = tau_;
-    reaction_time_counter_ = 0;
-    commanded_acc_.setZero();
-    // D_ = Eigen::Vector3d::Random().normalized();
-    // x_.block<3, 1>(11, 0) = D_;
-    // L_ = 2.0 * W_;
-    // x_(9) = L_;
-    // tau_ = (float)std::rand() / (float)RAND_MAX;
-    // x_(10) = tau_;
+    if (disturbed_init_) {
+      D_ << -err / err.norm();
+      D_ = D_ + 0.2 * randomPerpendicularVector(D_).normalized();
+      x_.block<3, 1>(11, 0) = D_.normalized();
+      L_ = err.norm() + 0.3 * (float)std::rand() / (float)RAND_MAX;
+      x_(9) = L_;
+      tau_ = 0.2 + 0.4 * (float)std::rand() / (float)RAND_MAX;
+      x_(10) = tau_;
+    } else {
+      D_ << -err / err.norm();
+      x_.block<3, 1>(11, 0) = D_;
+      L_ = std::max(err.norm(), W_);
+      x_(9) = L_;
+      tau_ = 0.0;
+      x_(10) = tau_;
+      reaction_time_counter_ = 0;
+      commanded_acc_.setZero();
+    }
     init_ = false;
   }
 
@@ -356,11 +360,14 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   f_QP_ = gain_linear_cost_ * err_lyap_.transpose() * W_e_ * P_ * B_;
   A_QP_ = err_lyap_.transpose() * P_ * B_;
   b_QP_ = -err_lyap_.transpose() * P_ * B_ * K_ev_;
-  lb_QP_ << -max_jerk_, -max_jerk_, -max_jerk_, lambda_L_ * (W_ - L_),
-      -lambda_tau_ * tau_ - (1 / T_), -max_omega_, -max_omega_, -max_omega_;
-  ub_QP_ << max_jerk_, max_jerk_, max_jerk_, lambda_L_ * (max_L_ - L_),
-      lambda_tau_ * (max_tau_ - tau_) - (1 / T_), max_omega_, max_omega_,
-      max_omega_;
+  lb_QP_ << -max_jerk_, -max_jerk_, -max_jerk_,
+      fmax(lambda_L_ * (W_ - L_), -max_L_dot_),
+      fmax(-lambda_tau_ * tau_, -max_L_dot_ / L_) - (1 / T_), -max_omega_,
+      -max_omega_, -max_omega_;
+  ub_QP_ << max_jerk_, max_jerk_, max_jerk_,
+      fmin(lambda_L_ * (max_L_ - L_), max_L_dot_),
+      fmin(lambda_tau_ * (max_tau_ - tau_), max_L_dot_ / L_) - (1 / T_),
+      max_omega_, max_omega_, max_omega_;
 
   // Solve QP
   bool success = solver_.solve(H_QP_, f_QP_, Eigen::MatrixXd::Zero(0, 0),
@@ -377,6 +384,9 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
     u_ = solver_.result();
     qp_state = "QP_success";
   }
+
+  // u_.block<3, 1>(0, 0) = u_.block<3, 1>(0,
+  // 0).cwiseMax(-max_jerk_).cwiseMin(max_jerk_);
 
   dx_ = f_ + g_ * u_;
   dx_(10) = (x_(10) + dx_(10) * solver.dt() < max_tau_)
@@ -395,35 +405,21 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   PositionTask::update(solver);
 }
 
-std::vector<Eigen::Vector3d> MinimumJerkTask::computeVelTraj() {
+std::vector<Eigen::Vector3d> MinimumJerkTask::computeTraj() {
   // Create phase values (100 equally spaced points between 0 and 1)
-  const int num_points = 25;
+  const int num_points = 10;
   std::vector<double> phase(num_points);
-  for (int i = 0; i < num_points; ++i) {
+  for (size_t i = 0; i < num_points; ++i) {
     phase[i] = static_cast<double>(i) / (num_points - 1);
   }
 
-  // Calculate velocity profile
-  std::vector<double> vel(num_points);
-  for (int i = 0; i < num_points; ++i) {
-    double t = phase[i];
-    vel[i] =
-        (30 * std::pow(t, 4) - 60 * std::pow(t, 3) + 30 * std::pow(t, 2)) / T_;
-  }
-
-  // Define "up" vector and calculate orthogonal vector
-  Eigen::Vector3d up(0, 0, 1);
-  Eigen::Vector3d ortho = up - (up.dot(D_)) * D_;
-  ortho.normalize();
-
   // Calculate projected phase and velocity
-  std::vector<Eigen::Vector3d> proj_vel(num_points);
-  for (int i = 0; i < num_points; ++i) {
-    Eigen::Vector3d proj_phase = target_pos_ + (1.0 - phase[i]) * L_ * D_;
-    proj_vel[i] = proj_phase + vel[i] * 0.25 * L_ * ortho;
+  std::vector<Eigen::Vector3d> proj_phase(num_points);
+  for (size_t i = 0; i < num_points; ++i) {
+    proj_phase[i] = target_pos_ + (1.0 - phase[i]) * L_ * D_;
   }
 
-  return proj_vel;
+  return proj_phase;
 }
 
 void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
@@ -542,21 +538,30 @@ void MinimumJerkTask::addToLogger(mc_rtc::Logger &logger) {
 
 void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
   gui.addElement(
-      {"Tasks", name_, "Hyperparameters", "Controller"},
-      mc_rtc::gui::NumberInput("Max tau", max_tau_),
+      {"Tasks", name_, "Hyperparameters", "Jacobians"},
       mc_rtc::gui::NumberInput("Jacobian's max tau", max_jac_tau_),
       mc_rtc::gui::NumberInput("Jacobians damping on L", lambda_jac_L_),
       mc_rtc::gui::NumberInput("Jacobians damping on tau", lambda_jac_tau_),
-      mc_rtc::gui::NumberInput("Jacobians damping on D", lambda_jac_D_),
+      mc_rtc::gui::NumberInput("Jacobians damping on D", lambda_jac_D_));
+
+  gui.addElement(
+      {"Tasks", name_, "Hyperparameters", "QP"},
+      mc_rtc::gui::NumberInput("Max tau", max_tau_),
       mc_rtc::gui::NumberInput("Linear cost gain [0;1]", gain_linear_cost_),
-      mc_rtc::gui::NumberInput("Input gamma", gamma_state_),
-      mc_rtc::gui::NumberInput("Output gamma", gamma_output_),
-      mc_rtc::gui::NumberInput("Vel filter tau", vel_filtering_tau_),
-      mc_rtc::gui::Checkbox("Filter velocity ?", filter_velocity_));
+      mc_rtc::gui::NumberInput("Jerk limit", max_jerk_),
+      mc_rtc::gui::NumberInput("L dot", max_L_dot_));
+
   gui.addElement({"Tasks", name_, "Hyperparameters", "Fitts"},
                  mc_rtc::gui::NumberInput("Fitts's constant (a)", fitts_a_),
                  mc_rtc::gui::NumberInput("Fitts's proportional (b)", fitts_b_),
                  mc_rtc::gui::NumberInput("Reaction time", reaction_time_));
+
+  gui.addElement({"Tasks", name_, "Hyperparameters", "Others"},
+                 mc_rtc::gui::NumberInput("Input gamma", gamma_state_),
+                 mc_rtc::gui::NumberInput("Output gamma", gamma_output_),
+                 mc_rtc::gui::NumberInput("Vel filter tau", vel_filtering_tau_),
+                 mc_rtc::gui::Checkbox("Filter velocity ?", filter_velocity_));
+
   gui.addElement({"Tasks", name_, "Gains"},
                  mc_rtc::gui::ArrayInput(
                      "LQR weight", {"e", "v", "a", "j"},
@@ -584,6 +589,7 @@ void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
                      "QP output",
                      {"jx", "jy", "jz", "length", "phase", "Dx", "Dy", "Dz"},
                      [this]() { return u_; }));
+
   gui.addElement(
       {"Tasks", name_, "Computed"},
       mc_rtc::gui::Label("Trajectory length", [this]() { return L_; }),
@@ -606,16 +612,21 @@ void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
           [this]() { return err_mj_; }),
       mc_rtc::gui::ArrayLabel("MjState", {"ex", "ey", "ez"},
                               [this]() { return mj_pose_; }));
+
   gui.addElement(
       {"Tasks", name_, "Visual"},
+      mc_rtc::gui::Trajectory(
+          "Vel trajectory",
+          mc_rtc::gui::LineConfig(mc_rtc::gui::Color(1.0, 0.0, 0.0)),
+          [this]() { return computeTraj(); }),
       mc_rtc::gui::Arrow(
           "MJ Direction",
-          mc_rtc::gui::ArrowConfig(mc_rtc::gui::Color(0.0, 0.0, 1.0, 0.3)),
+          mc_rtc::gui::ArrowConfig(mc_rtc::gui::Color(0.0, 0.0, 1.0, 0.8)),
           [this]() -> Eigen::Vector3d { return target_pos_; },
           [this]() -> Eigen::Vector3d { return target_pos_ + 0.1 * D_; }),
       mc_rtc::gui::Arrow(
           "Acc Direction",
-          mc_rtc::gui::ArrowConfig(mc_rtc::gui::Color(0.0, 1.0, 0.0, 0.3)),
+          mc_rtc::gui::ArrowConfig(mc_rtc::gui::Color(0.0, 1.0, 0.0, 0.8)),
           [this]() -> Eigen::Vector3d { return curr_pos_; },
           [this]() -> Eigen::Vector3d {
             return curr_pos_ - 0.1 * x_.block<3, 1>(6, 0).normalized();
@@ -623,16 +634,15 @@ void MinimumJerkTask::addToGUI(mc_rtc::gui::StateBuilder &gui) {
       mc_rtc::gui::Point3DRO("Target position", target_pos_),
       mc_rtc::gui::Point3DRO(
           "MinJerk state position",
-          mc_rtc::gui::PointConfig(mc_rtc::gui::Color(0.0, 1.0, 0.0)),
+          mc_rtc::gui::PointConfig(mc_rtc::gui::Color(0.0, 1.0, 0.0), 0.03),
           mj_pose_),
+      mc_rtc::gui::Point3DRO(
+          "Current state position",
+          mc_rtc::gui::PointConfig(mc_rtc::gui::Color(0.0, 0.0, 1.0), 0.03),
+          curr_pos_),
       mc_rtc::gui::Sphere(
           "Target area", [this]() { return 0.5 * W_; },
-          [this]() { return target_pos_; },
-          mc_rtc::gui::Color(0.0, 0.0, 1.0, 0.3)),
-      mc_rtc::gui::Trajectory(
-          "Vel trajectory",
-          mc_rtc::gui::LineConfig(mc_rtc::gui::Color(1.0, 0.0, 0.0)),
-          [this]() { return computeVelTraj(); }));
+          [this]() { return target_pos_; }, mc_rtc::gui::Color(1.0, 0.0, 0.0)));
   // PositionTask::addToGUI(gui);
 }
 } // namespace mc_tasks
