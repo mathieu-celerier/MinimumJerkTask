@@ -19,10 +19,10 @@ MinimumJerkTask::MinimumJerkTask(const mc_rbdyn::RobotFrame &frame,
     : PositionTask(frame, 0.0, weight), frame_(frame),
       bodyName_(frame_->body()), init_(true), disturbed_init_(false),
       gamma_state_(1.0), gamma_output_(0.0), qp_state("QP_success"), W_(0.03),
-      max_L_(2.0), max_L_dot_(10), max_tau_(0.999), max_jerk_(25),
+      max_L_(2.0), max_L_dot_(5), max_tau_(0.999), max_jerk_(50),
       max_omega_(10), lambda_L_(100), lambda_tau_(100), fitts_a_(0),
-      fitts_b_(1.0), max_jac_tau_(1.0), lambda_jac_L_(1e-2),
-      lambda_jac_tau_(0.1875), lambda_jac_D_(0.01), gain_linear_cost_(1.0),
+      fitts_b_(1.0), max_jac_tau_(1.0), lambda_jac_L_(0.03),
+      lambda_jac_tau_(0.5625), lambda_jac_D_(0.03), gain_linear_cost_(1.0),
       vel_filtering_tau_(0.0), filter_velocity_(false), filter_out(useFilter),
       jac_(new rbd::Jacobian(frame.robot().mb(), frame.body())), solver_() {
   switch (backend_) {
@@ -361,7 +361,7 @@ void MinimumJerkTask::update(mc_solver::QPSolver &solver) {
   A_QP_ = err_lyap_.transpose() * P_ * B_;
   b_QP_ = -err_lyap_.transpose() * P_ * B_ * K_ev_;
   lb_QP_ << -max_jerk_, -max_jerk_, -max_jerk_,
-      fmax(lambda_L_ * (W_ - L_), -max_L_dot_),
+      fmax(lambda_L_ * (2.0 * W_ - L_), -max_L_dot_),
       fmax(-lambda_tau_ * tau_, -max_L_dot_ / L_) - (1 / T_), -max_omega_,
       -max_omega_, -max_omega_;
   ub_QP_ << max_jerk_, max_jerk_, max_jerk_,
